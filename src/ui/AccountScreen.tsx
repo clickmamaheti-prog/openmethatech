@@ -73,7 +73,7 @@ export default function AccountScreen({ subscription, usedUsd, keySource }: Acco
       </Box>
 
       <Box marginTop={1}>
-        <Text color={theme.dim}>q keluar · metatech topup untuk isi saldo · metatech logout untuk keluar</Text>
+        <Text color={theme.dim}>q keluar · methatech topup untuk isi saldo · methatech logout untuk keluar</Text>
       </Box>
     </Box>
   );

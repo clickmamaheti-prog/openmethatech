@@ -16,7 +16,7 @@ export function credentialsPath(): string {
 
 export interface Credentials {
   apiKey: string;
-  /** Model picked last time, so `metatech chat` resumes with it. */
+  /** Model picked last time, so `methatech chat` resumes with it. */
   defaultModel?: string;
   savedAt?: string;
 }

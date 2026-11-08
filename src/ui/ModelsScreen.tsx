@@ -59,7 +59,7 @@ export default function ModelsScreen({ catalog, selectedModel }: ModelsScreenPro
 
       <Box marginTop={1}>
         <Text color={theme.dim}>
-          {catalog.entries.length} models · ▸ = model aktif · q keluar · metatech chat --model &lt;id&gt; untuk chat
+          {catalog.entries.length} models · ▸ = model aktif · q keluar · methatech chat --model &lt;id&gt; untuk chat
         </Text>
       </Box>
     </Box>

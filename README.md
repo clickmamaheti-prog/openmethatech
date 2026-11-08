@@ -8,7 +8,7 @@ Chat with MethaTech models from your terminal. Black + lime, Node.js + npm only.
 npm install
 npm run build
 node dist/cli.js --help
-# or: npm link   (then `metatech` works globally)
+# or: npm link   (then `methatech` works globally)
 ```
 
 Requires Node.js 20+.
@@ -16,7 +16,7 @@ Requires Node.js 20+.
 ## Login
 
 ```sh
-metatech login
+methatech login
 ```
 
 1. The CLI prints the login URL (`https://console.methatech.eu.org/login`)
@@ -37,13 +37,13 @@ export METATECH_API_KEY="sk-..."
 
 | Command | What it does |
 |---|---|
-| `metatech` (no args) | Chat TUI with the default model |
-| `metatech chat [--model <id>]` | Chat TUI |
-| `metatech models` | Model list: FREE $0.00 section + paid prices in $/1M |
-| `metatech account` | Spending limit, used, balance (all $) |
-| `metatech keys` | How to manage API keys in the panel |
-| `metatech topup` | Open the top-up page |
-| `metatech logout` | Delete the saved key |
+| `methatech` (no args) | Chat TUI with the default model |
+| `methatech chat [--model <id>]` | Chat TUI |
+| `methatech models` | Model list: FREE $0.00 section + paid prices in $/1M |
+| `methatech account` | Spending limit, used, balance (all $) |
+| `methatech keys` | How to manage API keys in the panel |
+| `methatech topup` | Open the top-up page |
+| `methatech logout` | Delete the saved key |
 
 Chat keys: `Enter` send · `↑↓` change model · `/models` list · `/model <id>`
 switch · `/clear` clear · `/help` help · `/exit` quit · `Ctrl+C` quit.

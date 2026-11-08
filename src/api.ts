@@ -21,11 +21,11 @@ function friendlyError(status: number, bodyText: string): ApiError {
   } catch {
     // keep raw text
   }
-  if (status === 401) return new ApiError(401, "API key tidak valid. Jalankan: metatech login", code);
+  if (status === 401) return new ApiError(401, "API key tidak valid. Jalankan: methatech login", code);
   if (status === 402) {
     return new ApiError(
       402,
-      "Saldo dan free credits habis. Top up dulu: metatech topup",
+      "Saldo dan free credits habis. Top up dulu: methatech topup",
       code
     );
   }

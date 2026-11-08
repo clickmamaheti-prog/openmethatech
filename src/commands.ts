@@ -151,14 +151,14 @@ async function cmdLoginDevice(): Promise<void> {
     const remaining = Math.ceil((deadline - Date.now()) / 1000);
     if (remaining <= 0) {
       process.stdout.write("\n");
-      console.log("Kode sudah kedaluwarsa. Jalankan lagi: metatech login");
+      console.log("Kode sudah kedaluwarsa. Jalankan lagi: methatech login");
       return;
     }
     process.stdout.write(`\rMenunggu persetujuan di browser... (${remaining}s tersisa)`);
     await sleep(waitSec * 1000);
     if (Date.now() >= deadline) {
       process.stdout.write("\n");
-      console.log("Kode sudah kedaluwarsa. Jalankan lagi: metatech login");
+      console.log("Kode sudah kedaluwarsa. Jalankan lagi: methatech login");
       return;
     }
     let result;
@@ -168,13 +168,13 @@ async function cmdLoginDevice(): Promise<void> {
     } catch (e) {
       if (e instanceof DeviceFlowError && e.terminal) {
         process.stdout.write("\n");
-        console.log("Kode sudah tidak berlaku (kedaluwarsa atau sudah dipakai). Jalankan lagi: metatech login");
+        console.log("Kode sudah tidak berlaku (kedaluwarsa atau sudah dipakai). Jalankan lagi: methatech login");
         return;
       }
       pollErrors += 1;
       if (pollErrors >= 3) {
         process.stdout.write("\n");
-        console.log("Tidak bisa memeriksa status login. Coba lagi: metatech login");
+        console.log("Tidak bisa memeriksa status login. Coba lagi: methatech login");
         return;
       }
       continue;
@@ -209,7 +209,7 @@ async function cmdLogin(opts: { paste?: boolean }): Promise<void> {
 function requireKey(): string {
   const key = resolveApiKey();
   if (!key) {
-    console.log("Belum login. Jalankan: metatech login");
+    console.log("Belum login. Jalankan: methatech login");
     console.log("atau set env METATECH_API_KEY.");
     process.exit(1);
   }
@@ -227,7 +227,7 @@ async function balanceOf(apiKey: string): Promise<number | null> {
 
 async function cmdChat(modelOpt?: string): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    console.log("metatech chat butuh terminal interaktif.");
+    console.log("methatech chat butuh terminal interaktif.");
     process.exit(1);
   }
   const apiKey = requireKey();
@@ -290,7 +290,7 @@ function cmdKeys(): void {
   console.log(`Key tersimpan di CLI ini: ${has ? "ada" : "tidak ada"}`);
   console.log("Kelola dan buat key baru di panel:");
   console.log(`  ${TOKEN_PAGE_URL}`);
-  console.log("Lalu jalankan: metatech login");
+  console.log("Lalu jalankan: methatech login");
 }
 
 function cmdTopup(): void {
@@ -318,7 +318,7 @@ function getVersion(): string {
 export function main(): void {
   const program = new Command();
   program
-    .name("metatech")
+    .name("methatech")
     .description("MethaTech CLI — chat with MethaTech models from your terminal")
     .version(getVersion());
 
