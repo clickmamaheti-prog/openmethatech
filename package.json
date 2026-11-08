@@ -1,0 +1,31 @@
+{
+  "name": "@methatech-cli/cli",
+  "version": "0.1.2",
+  "description": "MethaTech CLI — chat with MethaTech models from your terminal",
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "bin": {
+    "metatech": "./dist/cli.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node ./dist/cli.js"
+  },
+  "dependencies": {
+    "commander": "^14.0.2",
+    "ink": "^6.8.0",
+    "react": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "typescript": "^5.9.0"
+  }
+}

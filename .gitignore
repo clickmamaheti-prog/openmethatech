@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Backups
+*.bak
+*.bak-*
+
+# Env / secrets
+.env
+.env.*
+*.env
+credentials.json
+.secrets/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
