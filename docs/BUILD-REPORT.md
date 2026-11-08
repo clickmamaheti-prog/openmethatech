@@ -35,12 +35,14 @@ Keputusan: **CLI dibangun dengan Ink.** Tidak ada dependensi Bun di mana pun
   package.json          @methatech-cli/cli 0.1.1, bin: metatech -> dist/cli.js
   tsconfig.json         TypeScript strict, jsx react-jsx, outDir dist
   README.md             cara pakai
-  BUILD-REPORT.md       laporan ini
-  probe-bore-1.py       probe API live (bagian 1: models + billing) — bore-side, tanpa secret
-  probe-bore-2.py       probe API live (bagian 2: chat free + paid) — bore-side, tanpa secret
-  shot-chat-desktop.png screenshot chat (lebar desktop 100 kolom)
-  shot-chat-narrow.png  screenshot chat (sempit 80 kolom, gaya Termux)
-  shot-models-desktop.png screenshot daftar model
+  docs/BUILD-REPORT.md  laporan ini
+  docs/images/
+    shot-chat-desktop.png screenshot chat (lebar desktop 100 kolom)
+    shot-chat-narrow.png  screenshot chat (sempit 80 kolom, gaya Termux)
+    shot-models-desktop.png screenshot daftar model
+  scripts/
+    probe-bore-1.py     probe API live (bagian 1: models + billing) — bore-side, tanpa secret
+    probe-bore-2.py     probe API live (bagian 2: chat free + paid) — bore-side, tanpa secret
   src/
     cli.ts              entry (shebang node)
     commands.ts         wiring Commander + login/keys/topup/logout
@@ -93,7 +95,7 @@ Kata terlarang itu tidak ada di mana pun (grep kosong di `src/`, `dist/`,
 
 ### 5.1 Chat live ke API sungguhan (bore-side, token tes Reza, key tidak pernah tampil)
 
-Probe `probe-bore-2.py` (token id 16 "Tes", read-only DB, curl, config 0600
+Probe `scripts/probe-bore-2.py` (token id 16 "Tes", read-only DB, curl, config 0600
 dihapus sesudahnya). Prompt: "What is 2+2? Answer in one word.",
 `max_tokens: 20`:
 
@@ -108,7 +110,7 @@ chunk terakhir (jadi TUI bisa menampilkan token + biaya). Token prompt
 terlihat besar karena relay menambah system prompt — itu perilaku API, CLI
 menampilkan apa adanya.
 
-Probe `probe-bore-1.py`: `GET /v1/models` (Bearer) mengembalikan 27 model.
+Probe `scripts/probe-bore-1.py`: `GET /v1/models` (Bearer) mengembalikan 27 model.
 `GET /v1/dashboard/billing/subscription` → `hard_limit_usd` dkk.
 `GET /v1/dashboard/billing/usage` → `total_usage` dalam **sen**
 (terverifikasi: used_quota 191.137 → 38,2274; balance = limit − total/100).
@@ -143,17 +145,17 @@ Bukan cacat fungsional — pengetikan manusia normal tidak kena ini.
 
 ### 5.3 Screenshot (dicek sendiri sebelum diserahkan)
 
-- Chat desktop (100 kolom): `shot-chat-desktop.png`
-- Chat sempit (80 kolom, gaya Termux): `shot-chat-narrow.png` — header
+- Chat desktop (100 kolom): `images/shot-chat-desktop.png`
+- Chat sempit (80 kolom, gaya Termux): `images/shot-chat-narrow.png` — header
   `claude-sonnet-4-6 · $5.00 / $25.00 per 1M · Balance $8.4000` muat penuh
   di 80 kolom, jawaban + `2019 in / 4 out · $0.0102` tampil.
-- Daftar model desktop: `shot-models-desktop.png`
+- Daftar model desktop: `images/shot-models-desktop.png`
 
-![chat desktop](sandbox://workspace/metatech-cli/shot-chat-desktop.png)
+![chat desktop](images/shot-chat-desktop.png)
 
-![chat sempit 80 kolom](sandbox://workspace/metatech-cli/shot-chat-narrow.png)
+![chat sempit 80 kolom](images/shot-chat-narrow.png)
 
-![daftar model](sandbox://workspace/metatech-cli/shot-models-desktop.png)
+![daftar model](images/shot-models-desktop.png)
 
 ## 6. Yang BELUM dikerjakan (follow-up terpisah)
 
