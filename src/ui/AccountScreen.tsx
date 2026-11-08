@@ -32,48 +32,48 @@ export default function AccountScreen({ subscription, usedUsd, keySource }: Acco
         <Text color={theme.accent} bold>
           MethaTech
         </Text>
-        <Text color={theme.muted}> · account</Text>
+        <Text color={theme.secondary}> · account</Text>
       </Box>
 
       <Box marginTop={1} flexDirection="column">
         <Box>
-          <Text color={theme.muted}>Signed in </Text>
+          <Text color={theme.secondary}>Signed in </Text>
           <Text color={theme.text} bold>
             yes
           </Text>
-          <Text color={theme.dim}> (key dari {keySource === "env" ? "METATECH_API_KEY" : "file tersimpan"})</Text>
+          <Text color={theme.muted}> (key dari {keySource === "env" ? "METATECH_API_KEY" : "file tersimpan"})</Text>
         </Box>
         <Box>
-          <Text color={theme.muted}>Spending limit </Text>
+          <Text color={theme.secondary}>Spending limit </Text>
           <Text color={theme.text} bold>
             {limit === null ? "—" : formatUsd(limit)}
           </Text>
         </Box>
         <Box>
-          <Text color={theme.muted}>Used </Text>
+          <Text color={theme.secondary}>Used </Text>
           <Text color={theme.text} bold>
             {usedUsd === null ? "—" : formatUsd(usedUsd)}
           </Text>
         </Box>
         <Box>
-          <Text color={theme.muted}>Balance </Text>
+          <Text color={theme.secondary}>Balance </Text>
           <Text color={theme.accent} bold>
             {balance === null ? "—" : formatUsd(balance)}
           </Text>
         </Box>
         <Box>
-          <Text color={theme.muted}>Top up </Text>
+          <Text color={theme.secondary}>Top up </Text>
           <Text color={theme.accent}>{TOPUP_URL}</Text>
         </Box>
       </Box>
 
       <Box marginTop={1} flexDirection="column">
-        <Text color={theme.dim}>Email dan free credits tidak tersedia lewat API key.</Text>
-        <Text color={theme.dim}>Lihat detail lengkap di panel: {LOGIN_URL}</Text>
+        <Text color={theme.muted}>Email dan free credits tidak tersedia lewat API key.</Text>
+        <Text color={theme.muted}>Lihat detail lengkap di panel: {LOGIN_URL}</Text>
       </Box>
 
       <Box marginTop={1}>
-        <Text color={theme.dim}>q keluar · methatech topup untuk isi saldo · methatech logout untuk keluar</Text>
+        <Text color={theme.muted}>q keluar · methatech topup untuk isi saldo · methatech logout untuk keluar</Text>
       </Box>
     </Box>
   );

@@ -95,8 +95,8 @@ async function saveValidatedKey(key: string): Promise<boolean> {
   return true;
 }
 
-/** Manual paste flow: the original login, kept as fallback and --paste. */
-async function cmdLoginPaste(): Promise<void> {
+/** Manual paste flow: the original login, kept as fallback and --paste. Returns true when a key was validated and saved. */
+async function cmdLoginPaste(): Promise<boolean> {
   console.log("MethaTech login (tempel API key manual)");
   console.log("");
   console.log("1. Buka URL ini di browser dan pilih akun Google / GitHub:");
@@ -111,17 +111,17 @@ async function cmdLoginPaste(): Promise<void> {
   const key = await askHidden("Tempel API key: ");
   if (!key) {
     console.log("Key kosong, dibatalkan.");
-    return;
+    return false;
   }
-  await saveValidatedKey(key);
+  return saveValidatedKey(key);
 }
 
 /**
  * Device-code flow (Freebuff-style): minta kode ke panel, buka URL di
  * browser, lalu poll sampai user menyetujui di browser. Key tidak pernah
- * diketik atau ditampilkan.
+ * diketik atau ditampilkan. Returns true when a key was validated and saved.
  */
-async function cmdLoginDevice(): Promise<void> {
+async function cmdLoginDevice(): Promise<boolean> {
   console.log("MethaTech login");
   console.log("");
   let code;
@@ -130,8 +130,7 @@ async function cmdLoginDevice(): Promise<void> {
   } catch {
     console.log("Login device-code belum tersedia di panel, lanjut tempel API key manual.");
     console.log("");
-    await cmdLoginPaste();
-    return;
+    return cmdLoginPaste();
   }
   console.log("1. Buka URL ini di browser dan setujui login (sudah login Google / GitHub di browser):");
   console.log(`   ${code.verificationUriComplete}`);
@@ -152,14 +151,14 @@ async function cmdLoginDevice(): Promise<void> {
     if (remaining <= 0) {
       process.stdout.write("\n");
       console.log("Kode sudah kedaluwarsa. Jalankan lagi: methatech login");
-      return;
+      return false;
     }
     process.stdout.write(`\rMenunggu persetujuan di browser... (${remaining}s tersisa)`);
     await sleep(waitSec * 1000);
     if (Date.now() >= deadline) {
       process.stdout.write("\n");
       console.log("Kode sudah kedaluwarsa. Jalankan lagi: methatech login");
-      return;
+      return false;
     }
     let result;
     try {
@@ -169,26 +168,25 @@ async function cmdLoginDevice(): Promise<void> {
       if (e instanceof DeviceFlowError && e.terminal) {
         process.stdout.write("\n");
         console.log("Kode sudah tidak berlaku (kedaluwarsa atau sudah dipakai). Jalankan lagi: methatech login");
-        return;
+        return false;
       }
       pollErrors += 1;
       if (pollErrors >= 3) {
         process.stdout.write("\n");
         console.log("Tidak bisa memeriksa status login. Coba lagi: methatech login");
-        return;
+        return false;
       }
       continue;
     }
     if (result.status === "approved") {
       process.stdout.write("\n");
       console.log("Persetujuan diterima, memeriksa key...");
-      await saveValidatedKey(result.apiKey);
-      return;
+      return saveValidatedKey(result.apiKey);
     }
     if (result.status === "denied") {
       process.stdout.write("\n");
       console.log("Login ditolak di browser. Tidak ada key yang disimpan.");
-      return;
+      return false;
     }
     if (result.status === "slow_down") {
       waitSec = Math.min(waitSec * 2, 30);
@@ -198,12 +196,54 @@ async function cmdLoginDevice(): Promise<void> {
   }
 }
 
-async function cmdLogin(opts: { paste?: boolean }): Promise<void> {
-  if (opts.paste) {
-    await cmdLoginPaste();
+/** Login only (device-code, or paste with --paste). True when a key was saved. */
+async function runLogin(opts: { paste?: boolean }): Promise<boolean> {
+  if (opts.paste) return cmdLoginPaste();
+  return cmdLoginDevice();
+}
+
+/**
+ * After a successful login, hand the terminal over to the chat TUI.
+ * Login itself leaves stdout writes (and, for --paste, a raw-mode stdin
+ * session) behind; cmdChat clears the screen first so Ink starts clean.
+ * Non-TTY: the key is already saved, so just point at `methatech chat`.
+ */
+async function enterChatAfterLogin(): Promise<void> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    console.log("Login berhasil. TUI butuh terminal interaktif — jalankan: methatech chat");
     return;
   }
-  await cmdLoginDevice();
+  console.log("Membuka TUI utama...");
+  await sleep(500);
+  await cmdChat(undefined, { clearScreen: true });
+}
+
+async function cmdLogin(opts: { paste?: boolean }): Promise<void> {
+  const ok = await runLogin(opts);
+  if (!ok) return;
+  await enterChatAfterLogin();
+}
+
+/**
+ * Bare `methatech`: with a key, straight into the TUI (as before); without
+ * one, run login first and enter the TUI when it succeeds. Non-TTY without
+ * a key exits instead of hanging on a login prompt.
+ */
+async function cmdNoArgs(): Promise<void> {
+  if (resolveApiKey()) {
+    await cmdChat();
+    return;
+  }
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    console.log("Belum login. Jalankan: methatech login");
+    console.log("atau set env METATECH_API_KEY.");
+    process.exit(1);
+  }
+  console.log("Belum login — membuka login dulu, lalu langsung masuk TUI.");
+  console.log("");
+  const ok = await runLogin({});
+  if (!ok) return;
+  await enterChatAfterLogin();
 }
 
 function requireKey(): string {
@@ -225,7 +265,7 @@ async function balanceOf(apiKey: string): Promise<number | null> {
   }
 }
 
-async function cmdChat(modelOpt?: string): Promise<void> {
+async function cmdChat(modelOpt?: string, opts?: { clearScreen?: boolean }): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     console.log("methatech chat butuh terminal interaktif.");
     process.exit(1);
@@ -240,6 +280,9 @@ async function cmdChat(modelOpt?: string): Promise<void> {
   const model = known ? requested : FALLBACK_MODEL;
   if (!known) console.log(`Model ${requested} tidak dikenal, memakai ${FALLBACK_MODEL}.`);
   const balance = await balanceOf(apiKey);
+  // Fresh screen when coming straight from login, so no login output is
+  // left stacked above the TUI. Ink then owns the screen from the top.
+  if (opts?.clearScreen) process.stdout.write("\x1b[2J\x1b[H");
   const app = render(
     React.createElement(ChatApp, { apiKey, initialModel: model, catalog, balanceUsd: balance })
   );
@@ -360,8 +403,10 @@ export function main(): void {
     .action(() => cmdLogout());
 
   // No command = chat with the default model (Freebuff behaviour).
+  // With a key saved this opens the TUI directly; without one it logs
+  // in first, then opens the TUI on success.
   if (process.argv.length <= 2) {
-    void cmdChat();
+    void cmdNoArgs();
     return;
   }
   program.parse(process.argv);

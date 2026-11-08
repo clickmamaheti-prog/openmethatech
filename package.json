@@ -1,6 +1,6 @@
 {
   "name": "@methatech-cli/cli",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "MethaTech CLI — chat with MethaTech models from your terminal",
   "type": "module",
   "files": [
@@ -15,6 +15,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "test": "node --test \"test/*.test.mjs\"",
     "dev": "tsc --watch",
     "start": "node ./dist/cli.js"
   },

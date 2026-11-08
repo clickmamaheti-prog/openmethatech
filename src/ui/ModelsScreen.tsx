@@ -24,8 +24,8 @@ export default function ModelsScreen({ catalog, selectedModel }: ModelsScreenPro
         <Text color={theme.accent} bold>
           MethaTech
         </Text>
-        <Text color={theme.muted}> · models</Text>
-        <Text color={theme.dim}> {catalog.live ? "(live)" : "(offline, harga tersimpan)"}</Text>
+        <Text color={theme.secondary}> · models</Text>
+        <Text color={theme.muted}> {catalog.live ? "(live)" : "(offline, harga tersimpan)"}</Text>
       </Box>
 
       <Box marginTop={1} flexDirection="column">
@@ -58,7 +58,7 @@ export default function ModelsScreen({ catalog, selectedModel }: ModelsScreenPro
       </Box>
 
       <Box marginTop={1}>
-        <Text color={theme.dim}>
+        <Text color={theme.muted}>
           {catalog.entries.length} models · ▸ = model aktif · q keluar · methatech chat --model &lt;id&gt; untuk chat
         </Text>
       </Box>
