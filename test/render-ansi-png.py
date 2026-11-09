@@ -74,19 +74,19 @@ def parse_line(line):
                 bg = (0, 0, 0)
             elif p == 38 and i + 2 < len(params) and params[i + 1] == 2:
                 fg = tuple(params[i + 2:i + 5])
-                i += 4
+                i += 5
                 continue
             elif p == 48 and i + 2 < len(params) and params[i + 1] == 2:
                 bg = tuple(params[i + 2:i + 5])
-                i += 4
+                i += 5
                 continue
             elif p == 38 and i + 2 < len(params) and params[i + 1] == 5:
                 fg = xterm256(params[i + 2])
-                i += 2
+                i += 3
                 continue
             elif p == 48 and i + 2 < len(params) and params[i + 1] == 5:
                 bg = xterm256(params[i + 2])
-                i += 2
+                i += 3
                 continue
             i += 1
         pos = m.end()

@@ -14,6 +14,42 @@
 
 import { splitMessageParts } from "./syntax.js";
 import { markdown, theme } from "../theme.js";
+import { sanitizeTerminalOutput, sanitizeTerminalText } from "./terminal-safe.js";
+import { cellWidth, textWidth } from "./cells.js";
+import { parseMarkdown, renderInlineText, renderMarkdownText, renderTable, wrapSegments } from "./markdown.js";
+import type { Table } from "mdast";
+
+// Cell widths live in cells.ts (moved out of this file so markdown.ts
+// can measure text without a circular import); re-exported here so
+// existing imports (tests, ChatApp) keep working.
+export { cellWidth, textWidth };
+
+/**
+ * Horizontal gutter, Freebuff message-with-agents.tsx:105 —
+ * `SIDE_GUTTER = 1`. The message box adds 1 column of padding on
+ * each side, ON TOP of the scroll container's own padding
+ * (chat.tsx scrollbox contentOptions: `paddingLeft: 1, paddingRight:
+ * 2`, where the right 2 = 1 gutter + 1 scrollbar track; chat-header
+ * and status-bar add their own `paddingLeft: 1` on top of the scroll
+ * container too).
+ *
+ * MethaTech (Ink) layering that mirrors it:
+ * - scroll container = the root Box in ChatApp.tsx (`paddingX={1}`);
+ * - message box = flattenMessages, which prepends this 1-column
+ *   gutter to every flattened line (left side) and wraps at
+ *   `contentWidth - SIDE_GUTTER` (right side — the spare column
+ *   already subtracted in contentWidth).
+ * Result: message text sits at column 2 from the terminal edge and
+ * wraps so its right edge never moves — exactly Freebuff's text
+ * column (scroll 1 + message 1 = col 2). The header gets its own
+ * +1 via paddingLeft on its Box (Freebuff chat-header.tsx:46-47);
+ * the footer/status row stays at col 1 (Freebuff status-bar.tsx:41,
+ * root-level padding 1); the input box keeps its border at col 1
+ * with 1 space inside (Freebuff chat-input-bar.tsx:485-499 puts the
+ * border at col 0 with padding 1 inside — MethaTech deliberately
+ * keeps the border inset 1 so it never touches the edge).
+ */
+export const SIDE_GUTTER = 1;
 
 /** Input placeholder (Freebuff chat-input-bar.tsx: "Enter a coding task
     or / for commands"). Shown dimmed inside the bordered input box
@@ -53,11 +89,17 @@ export function breakpoints(
   return { width, height };
 }
 
+// Cell widths (cellWidth, textWidth) live in cells.ts now — see the
+// re-export at the top of this file.
+
 /**
  * Greedy word wrap of one string to at most `width` columns per line.
  * Newlines in the input start a new visual line; empty lines stay empty.
  * Words longer than `width` are hard-split. Multiple spaces collapse to
  * one (chat text; code lines are wrapped by splitSegments instead).
+ * Widths are terminal cells (textWidth), not JS string length, so
+ * wide CJK/emoji chars wrap at the right column (Freebuff wrapText
+ * uses string-width for the same reason).
  */
 export function wrapText(text: string, width: number): string[] {
   if (width <= 0) return [""];
@@ -70,18 +112,27 @@ export function wrapText(text: string, width: number): string[] {
     let line = "";
     for (const word of raw.split(" ")) {
       if (word === "") continue;
-      // Hard-split an over-long word into width-sized chunks.
+      // Hard-split an over-long word into width-sized chunks
+      // (by terminal cells, so a wide char never straddles a break).
       let rest = word;
-      while (rest.length > width) {
+      while (textWidth(rest) > width) {
         if (line !== "") {
           out.push(line);
           line = "";
         }
-        out.push(rest.slice(0, width));
-        rest = rest.slice(width);
+        let chunk = "";
+        let chunkW = 0;
+        for (const ch of rest) {
+          const w = cellWidth(ch);
+          if (chunkW + w > width && chunk !== "") break;
+          chunk += ch;
+          chunkW += w;
+        }
+        out.push(chunk);
+        rest = rest.slice(chunk.length);
       }
       if (line === "") line = rest;
-      else if (line.length + 1 + rest.length <= width) line += " " + rest;
+      else if (textWidth(line) + 1 + textWidth(rest) <= width) line += " " + rest;
       else {
         out.push(line);
         line = rest;
@@ -104,6 +155,8 @@ export interface VisualSegment {
   bold?: boolean;
   italic?: boolean;
   strikethrough?: boolean;
+  /** DIM attribute (Freebuff markdown delete `~~text~~` renders DIM). */
+  dim?: boolean;
   backgroundColor?: string;
 }
 
@@ -138,18 +191,28 @@ export function splitSegments(segments: VisualSegment[], width: number): VisualL
     curLen = 0;
   };
   for (const seg of segments) {
-    let rest = seg.text;
-    while (rest.length > 0) {
+    // Split by code points so a wide char is never cut in half and
+    // its 2-cell width is counted (Freebuff wrapText: string-width).
+    const chars = [...seg.text];
+    let i = 0;
+    while (i < chars.length) {
       const room = width - curLen;
       if (room <= 0) {
         flush();
         continue;
       }
-      const take = rest.slice(0, room);
+      let take = "";
+      let takeW = 0;
+      while (i < chars.length) {
+        const w = cellWidth(chars[i] as string);
+        if (takeW + w > room && take !== "") break;
+        take += chars[i];
+        takeW += w;
+        i++;
+      }
       cur.push({ ...seg, text: take });
-      curLen += take.length;
-      rest = rest.slice(take.length);
-      if (rest.length > 0) flush();
+      curLen += takeW;
+      if (i < chars.length) flush();
     }
   }
   flush();
@@ -169,6 +232,22 @@ export interface LayoutMessage {
   thinkingComplete?: boolean;
   /** To-do list for kind "todos" (Freebuff shape: {task, completed}). */
   todos?: { task: string; completed: boolean }[];
+  /**
+   * Structured tool call for kind "tool" (Freebuff ToolCallItem +
+   * TerminalCommandDisplay semantics). The preview line renders BOLD
+   * in foreground; a shell preview renders `$ ` in success green +
+   * the command BOLD; each result line renders ✓ in success green
+   * or ✗ in error red, so a failed call is never painted as a
+   * success. `preview`/`results` are plain text (no ANSI — external
+   * text is sanitized before it reaches the layout).
+   */
+  tool?: {
+    name: string;
+    preview: string;
+    /** True for run_terminal_command (Freebuff `$ ` + bold command). */
+    shell: boolean;
+    results: { ok: boolean; text: string }[];
+  };
 }
 
 /** Format an epoch-ms timestamp as [HH:MM] (local time). */
@@ -179,124 +258,29 @@ export function formatTimestamp(ts: number): string {
   return `[${hh}:${mm}]`;
 }
 
-/**
- * Inline Markdown for one wrapped line. Freebuff
- * cli/src/utils/markdown-renderer.tsx (dark theme palette from
- * theme-system.ts): **bold** = bold only; `code` = BOLD with a space
- * pad on each side, fg inlineCodeFg (#FF8534) on bg codeBackground
- * (#374151); [text](url) = fg linkFg (#3B82F6). Markers never span
- * lines (lines are wrapped first, then parsed).
- */
-export function inlineSegments(line: string, baseColor?: string): VisualSegment[] {
-  const segments: VisualSegment[] = [];
-  const re = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g;
-  let last = 0;
-  let m: RegExpExecArray | null;
-  const push = (
-    text: string,
-    color?: string,
-    bold?: boolean,
-    backgroundColor?: string,
-  ) => {
-    if (text.length === 0) return;
-    segments.push({ text, color, bold, backgroundColor });
-  };
-  while ((m = re.exec(line)) !== null) {
-    if (m.index > last) push(line.slice(last, m.index), baseColor);
-    const token = m[0];
-    if (token.startsWith("**")) {
-      push(token.slice(2, -2), baseColor, true);
-    } else if (token.startsWith("`")) {
-      // Freebuff: <span fg={inlineCodeFg} bg={codeBackground} BOLD>
-      // with a space pad: ` ${content} `.
-      push(` ${token.slice(1, -1)} `, markdown.inlineCodeFg, true, markdown.codeBackground);
-    } else {
-      // [text](url): the link text renders in link blue; the URL is
-      // not shown (Freebuff renders the anchor text only).
-      push(token.slice(1, token.indexOf("]")), markdown.linkFg);
-    }
-    last = m.index + token.length;
-  }
-  if (last < line.length) push(line.slice(last), baseColor);
-  if (segments.length === 0) segments.push({ text: line, color: baseColor });
-  return segments;
-}
+// Markdown rendering (inlineSegments, markdownLines, tableLines'
+// box-drawing) moved to markdown.ts: the text is now parsed FIRST
+// into an mdast AST (unified + remark-parse + remark-gfm +
+// remark-breaks — the same packages Freebuff uses) and wrapped as
+// styled segments, so a wrap can never fall inside a **bold** /
+// *italic* / ~~strike~~ / `code` span and leak raw markers (docs
+// §4g). flattenMessages below calls renderMarkdownText for text
+// parts; tableLines stays here as a thin adapter for raw row
+// strings (tests + legacy callers).
 
 /**
- * One raw (unwrapped) text line as visual lines, handling the
- * line-level Markdown Freebuff renders: headings (#..######),
- * blockquotes (>), list bullets (- * + and N.), horizontal rules.
- * Everything else falls back to inlineSegments.
+ * Box-drawing table from raw Markdown row strings. Parses the rows
+ * with the real Markdown parser and renders via markdown.ts
+ * renderTable — identical output to the AST path inside
+ * renderMarkdownText, no duplicated box-drawing code.
  */
-export function markdownLines(rawLine: string, width: number): VisualLine[] {
-  const out: VisualLine[] = [];
-  const heading = /^(#{1,6})\s+(.*)$/.exec(rawLine);
-  if (heading) {
-    // Freebuff: headingFg #facc15 (yellow) + bold, every level.
-    for (const w of wrapText(heading[2], width)) {
-      out.push({ segments: [{ text: w, color: markdown.headingFg, bold: true }] });
-    }
-    return out;
-  }
-  const bq = /^>\s?(.*)$/.exec(rawLine);
-  if (bq) {
-    const inner = Math.max(1, width - 2);
-    for (const w of wrapText(bq[1], inner)) {
-      out.push({
-        segments: [
-          { text: "▎ ", color: markdown.blockquoteBorderFg },
-          { text: w, color: markdown.blockquoteTextFg },
-        ],
-      });
-    }
-    return out;
-  }
-  const list = /^(\s*)([-*+]|\d+\.)\s+(.*)$/.exec(rawLine);
-  if (list) {
-    const indent = list[1];
-    const marker = list[2];
-    const prefix = `${indent}${marker} `;
-    const cont = `${indent}${" ".repeat(marker.length + 1)}`;
-    const inner = Math.max(1, width - prefix.length);
-    const wrapped = wrapText(list[3], inner);
-    wrapped.forEach((w, i) => {
-      if (i === 0) {
-        out.push({
-          segments: [
-            { text: indent },
-            { text: marker, color: markdown.listBulletFg },
-            { text: " " },
-            { text: w, color: theme.text },
-          ],
-        });
-      } else {
-        out.push({ segments: [{ text: cont }, { text: w, color: theme.text }] });
-      }
-    });
-    return out;
-  }
-  if (/^(---|\*\*\*|___)\s*$/.test(rawLine)) {
-    out.push({ segments: [{ text: "─".repeat(Math.max(1, width)), color: markdown.dividerFg }] });
-    return out;
-  }
-  for (const w of wrapText(rawLine, width)) out.push({ segments: inlineSegments(w, theme.text) });
-  return out;
+export function tableLines(rows: string[], width: number): VisualLine[] {
+  const root = parseMarkdown(rows.join("\n"));
+  const table = root.children.find((c) => c.type === "table");
+  if (!table) return [];
+  return renderTable(table as Table, width);
 }
 
-/**
- * Flatten messages into exact visual lines at `width` columns, in
- * display order. Every returned line is already wrapped, so rendering
- * one line per Ink row never re-wraps and the budget math stays exact.
- * Each message is followed by one blank line (its marginBottom —
- * Freebuff message-with-agents.tsx: paddingBottom 1 except the last).
- * User messages carry a 1-column solid left border (backgroundColor
- * theme.userLine + 1 gutter space, Freebuff message-with-agents.tsx)
- * and a muted [HH:MM] timestamp above the content; AI messages have
- * no border line and no timestamp. Assistant text keeps **bold** /
- * `code` inline Markdown (Freebuff palette: inline code orange on
- * dark gray, headings yellow, links blue); code blocks are Freebuff
- * monochrome on a dark-gray background with a "// lang" header.
- */
 export function flattenMessages(
   messages: LayoutMessage[],
   width: number,
@@ -311,15 +295,93 @@ export function flattenMessages(
     { text: " ", backgroundColor: theme.userLine },
     { text: " " },
   ];
-  for (const m of messages) {
+  for (const raw of messages) {
+    // Render boundary: EVERYTHING that reaches the terminal passes
+    // through here, so this is where external text is made safe
+    // (Freebuff common/src/util/terminal-safe-text.ts). The stored
+    // message keeps its raw text — the agent history in loop.ts and
+    // /compact need the real tool output — but the drawn copy is
+    // cleaned. Sanitizing here (not per stream chunk) also keeps a
+    // split escape sequence whole: chunk 1 may end mid-CSI and chunk
+    // 2 carry the rest, and only the reassembled content is safe to
+    // judge. Tool output uses sanitizeTerminalOutput (a bare \r is
+    // a progress-bar redraw, not a line break); everything else
+    // uses sanitizeTerminalText.
+    const m: LayoutMessage = {
+      ...raw,
+      content: sanitizeTerminalText(raw.content),
+      thinking: raw.thinking === undefined ? undefined : sanitizeTerminalText(raw.thinking),
+      todos: raw.todos?.map((t) => ({ ...t, task: sanitizeTerminalText(t.task) })),
+      tool:
+        raw.tool === undefined
+          ? undefined
+          : {
+              ...raw.tool,
+              preview: sanitizeTerminalText(raw.tool.preview),
+              results: raw.tool.results.map((r) => ({ ...r, text: sanitizeTerminalOutput(r.text) })),
+            },
+    };
     const tsLine = m.ts !== undefined ? plainLine(formatTimestamp(m.ts), theme.muted) : null;
     if (m.kind === "tool") {
-      // Agent tool call: preview line in neon, result lines muted.
-      // Content is preformatted by the agent loop (preview + summary).
-      const wrapped = wrapText(m.content, width);
-      wrapped.forEach((w, i) => {
-        lines.push(plainLine(w, i === 0 ? theme.accentSecondary : theme.muted));
-      });
+      // Agent tool call — Freebuff ToolCallItem + TerminalCommandDisplay:
+      // the header is the tool preview BOLD in foreground; a shell
+      // preview renders `$ ` in success green + the command BOLD
+      // (TerminalCommandDisplay); each result line renders ✓ in
+      // success green or ✗ in error red, so a failed call is never
+      // painted as a success. Unstructured legacy tool messages
+      // (plain content string) keep the old neon-first-line look.
+      const tool = m.tool;
+      if (tool) {
+        // Word-wrap the preview (never split a word mid-token the
+        // way a hard split would: "$ ... echo lin/e4"). First line
+        // carries the `$ ` prefix (shell) or the plain preview;
+        // continuation lines indent 2 spaces under the command.
+        const wrappedPreview = wrapText(tool.preview, width);
+        wrappedPreview.forEach((w, i) => {
+          if (tool.shell && tool.preview.startsWith("$ ")) {
+            if (i === 0) {
+              lines.push({
+                segments: [
+                  { text: "$ ", color: theme.success, bold: true },
+                  { text: w.slice(2), color: theme.text, bold: true },
+                ],
+              });
+            } else {
+              lines.push({
+                segments: [
+                  { text: "  " },
+                  { text: w, color: theme.text, bold: true },
+                ],
+              });
+            }
+          } else {
+            lines.push({ segments: [{ text: w, color: theme.text, bold: true }] });
+          }
+        });
+        for (const r of tool.results) {
+          const wrapped = wrapText(r.text, Math.max(1, width - 4));
+          wrapped.forEach((w, i) => {
+            lines.push({
+              segments:
+                i === 0
+                  ? [
+                      { text: "  " },
+                      { text: r.ok ? "✓ " : "✗ ", color: r.ok ? theme.success : theme.error, bold: true },
+                      { text: w, color: r.ok ? theme.muted : theme.error },
+                    ]
+                  : [
+                      { text: "    " },
+                      { text: w, color: r.ok ? theme.muted : theme.error },
+                    ],
+            });
+          });
+        }
+      } else {
+        const wrapped = wrapText(m.content, width);
+        wrapped.forEach((w, i) => {
+          lines.push(plainLine(w, i === 0 ? theme.accentSecondary : theme.muted));
+        });
+      }
     } else if (m.kind === "todos") {
       // Freebuff cli/src/components/tools/write-todos.tsx: header
       // "• TODOs" (bullet + BOLD "TODOs", foreground); items indented
@@ -372,22 +434,34 @@ export function flattenMessages(
       // Freebuff single-block.tsx:102 — the whole user text block is
       // ITALIC (attributes={isUser ? ITALIC : undefined}). The "You: "
       // label stays bold non-italic; the message content is italic.
+      // Freebuff also renders user content through its markdown
+      // renderer (UserBlockTextWithInlineCopy), so **bold** / `code` /
+      // links inside a user message render instead of showing raw
+      // markers. Parse first, wrap after: each raw line is parsed
+      // as inline Markdown (renderInlineText) and wrapped as styled
+      // segments (wrapSegments), so a span can never leak across a
+      // wrap boundary. The "You: " label (5 cols) comes out of the
+      // first line's budget; continuation lines keep the border only.
       if (tsLine) lines.push(tsLine);
       const inner = Math.max(1, width - 2);
-      const wrapped = wrapText(`You: ${m.content}`, inner);
-      wrapped.forEach((w, i) => {
-        if (i === 0) {
+      const labelW = 5; // "You: "
+      let firstLine = true;
+      for (const rawLine of m.content.split("\n")) {
+        const segs = renderInlineText(rawLine, theme.text).map((s) => ({ ...s, italic: true }));
+        const wrapped = wrapSegments(segs.length > 0 ? segs : [{ text: " " }], Math.max(1, inner - (firstLine ? labelW : 0)));
+        wrapped.forEach((wl, i) => {
           lines.push({
             segments: [
               ...borderSegs,
-              { text: "You: ", color: theme.userLabel, bold: true },
-              { text: w.slice(5), color: theme.text, italic: true },
+              ...(firstLine && i === 0
+                ? [{ text: "You: ", color: theme.userLabel, bold: true } as VisualSegment]
+                : []),
+              ...wl.segments,
             ],
           });
-        } else {
-          lines.push({ segments: [...borderSegs, { text: w, color: theme.text, italic: true }] });
-        }
-      });
+        });
+        firstLine = false;
+      }
     } else {
       // Freebuff message-block.tsx: the assistant block carries NO
       // timestamp (timestamps are a user-line thing). The thinking
@@ -443,8 +517,21 @@ export function flattenMessages(
       // message (the streaming placeholder, or a turn whose model
       // only thought) emits one blank line from its empty content
       // PLUS the message's trailing blank line — two blank rows.
-      for (const part of m.content.trim().length === 0 ? [] : splitMessageParts(m.content)) {
+      // pendingBlank lives at the parts level: a text part that ends
+      // with blank lines hands the break to the NEXT part — a code
+      // block keeps the paragraph break (it is not a tight
+      // followup), while a trailing blank at the end of the message
+      // is dropped (the message's own trailing blank line follows).
+      const parts = m.content.trim().length === 0 ? [] : splitMessageParts(m.content);
+      let pendingBlank = false;
+      let emitted = false;
+      parts.forEach((part, pi) => {
         if (part.type === "code") {
+          if (pendingBlank) {
+            lines.push(blankLine());
+            pendingBlank = false;
+          }
+          emitted = true;
           // Freebuff markdown-renderer.tsx: code blocks are MONOCHROME
           // (no per-token colors) — header "// lang" in codeHeaderFg,
           // body lines in codeTextFg on codeBackground.
@@ -462,19 +549,48 @@ export function flattenMessages(
             for (const l of splitSegments(segs, width)) lines.push(l);
           }
         } else {
-          for (const rawLine of part.content.split("\n")) {
-            if (rawLine === "") {
-              lines.push(blankLine());
-              continue;
+          // Parse-first Markdown (markdown.ts renderMarkdownText):
+          // the whole text part goes through remark into an mdast
+          // AST, blocks render from the AST, inline spans wrap as
+          // styled segments. A pending blank is the part-boundary
+          // rule only — paragraph spacing INSIDE the part is the
+          // AST renderer's own job (blank after a paragraph unless
+          // the next block is a tight followup: list / blockquote /
+          // heading / divider / table). A text part that starts or
+          // ends with a blank line hands the break to the neighbour
+          // part (a code block keeps the paragraph break; a trailing
+          // blank at the end of the message is dropped — the
+          // message's own trailing blank line follows). The gap is
+          // emitted once content has been emitted in this message,
+          // so a leading newline never grows a leading blank line.
+          const rendered = renderMarkdownText(part.content, width);
+          if (rendered.lines.length === 0) {
+            if ((rendered.endsBlank || rendered.startsBlank) && (emitted || pi > 0)) {
+              pendingBlank = true;
             }
-            for (const l of markdownLines(rawLine, width)) lines.push(l);
+          } else {
+            if ((pendingBlank || rendered.startsBlank) && (emitted || pi > 0) && !rendered.startsTight) {
+              lines.push(blankLine());
+            }
+            pendingBlank = false;
+            emitted = true;
+            for (const l of rendered.lines) lines.push(l);
+            pendingBlank = rendered.endsBlank;
           }
         }
-      }
+      });
     }
     lines.push(blankLine());
   }
-  return lines;
+  // Message-box gutter (SIDE_GUTTER): every flattened line gets one
+  // leading space, so the message text sits at column 2 from the
+  // terminal edge (root padding 1 + message gutter 1), exactly like
+  // Freebuff (scrollbox 1 + SIDE_GUTTER 1). Blank separator lines get
+  // the gutter too — they are spaces either way, and keeping the
+  // prefix uniform means no line ever starts at column 1. The `width`
+  // the caller passes is the TEXT width (already minus SIDE_GUTTER),
+  // so dividers/tables keep their right edge where it was.
+  return lines.map((l) => ({ segments: [{ text: " ".repeat(SIDE_GUTTER) }, ...l.segments] }));
 }
 
 export interface LayoutBudgetInput {
@@ -700,6 +816,26 @@ export function pageScrollOffset(
   return Math.max(0, current - page);
 }
 
+/**
+ * Mouse-wheel step (Freebuff ScrollBox onMouseEvent with the default
+ * LinearScrollAccel: 1 line per wheel tick — one Termux swipe row
+ * sends exactly one wheel event, so finger and content track 1:1).
+ * Unlike PgUp/PgDn this is applied immediately, with no 200ms
+ * animation: a fling sends many events in a burst and animating
+ * each one would lag behind the finger. Clamps like pageScrollOffset.
+ */
+export function wheelScrollOffset(
+  current: number,
+  direction: "up" | "down",
+  lines: number,
+  available: number,
+  totalLines: number,
+): number {
+  const maxOffset = Math.max(0, totalLines - Math.max(0, available));
+  if (direction === "up") return Math.min(maxOffset, current + Math.max(0, lines));
+  return Math.max(0, current - Math.max(0, lines));
+}
+
 // ---------------------------------------------------------------------------
 // Welcome / empty state — shown only while there are no messages yet.
 // Freebuff fills its first screen with content (logo, info box,
@@ -730,9 +866,9 @@ export function bannerLines(word: string): string[] {
   return rows;
 }
 
-/** Plain-text length of a line (sum of its segments). */
+/** Terminal cell width of a line (sum of its segments). */
 function lineLength(line: VisualLine): number {
-  return line.segments.reduce((n, s) => n + s.text.length, 0);
+  return line.segments.reduce((n, s) => n + textWidth(s.text), 0);
 }
 
 /** Center a line in `width` by left-padding with spaces. */

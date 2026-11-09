@@ -99,7 +99,22 @@ export function splitMessageParts(content: string): MessagePart[] {
     lastEnd = m.index + m[0].length;
   }
   if (lastEnd < content.length) {
-    parts.push({ type: "text", lang: "", content: content.slice(lastEnd) });
+    // A fence that never closes (streaming: the model is still
+    // writing the block) is a CODE part, not text — Freebuff's
+    // streaming renderer shows a pending fence as raw code, so its
+    // content is never markdown-parsed mid-stream (a half-written
+    // `**bold**` inside a code block must not flash as bold text).
+    const tail = content.slice(lastEnd);
+    const open = /```([A-Za-z0-9_+-]*)\n?([\s\S]*)$/.exec(tail);
+    if (open) {
+      const before = tail.slice(0, open.index);
+      if (before.length > 0) {
+        parts.push({ type: "text", lang: "", content: before });
+      }
+      parts.push({ type: "code", lang: open[1] ?? "", content: open[2] ?? "" });
+    } else {
+      parts.push({ type: "text", lang: "", content: tail });
+    }
   }
   if (parts.length === 0) parts.push({ type: "text", lang: "", content });
   return parts;

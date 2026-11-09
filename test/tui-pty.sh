@@ -31,14 +31,17 @@ chmod 600 "$METATECH_CONFIG_DIR/credentials.json"
 PASS=0
 FAIL=0
 check() { # check <file> <needle> <label>
-  if grep -qF "$2" "$1"; then
+  # NOTE: `--` before the needle — a needle starting with "-" (e.g.
+  # "- [x]") must not be parsed as a grep option. Without it the
+  # check "passes" vacuously because grep errors out.
+  if grep -qF -- "$2" "$1"; then
     echo "PASS: $3"; PASS=$((PASS+1))
   else
     echo "FAIL: $3 (needle '$2' not found in $1)"; FAIL=$((FAIL+1))
   fi
 }
 check_absent() { # check_absent <file> <needle> <label>
-  if grep -qF "$2" "$1"; then
+  if grep -qF -- "$2" "$1"; then
     echo "FAIL: $3 (needle '$2' unexpectedly found in $1)"; FAIL=$((FAIL+1))
   else
     echo "PASS: $3"; PASS=$((PASS+1))
@@ -67,6 +70,29 @@ check_last_row() { # check_last_row <file> <needle> <expected-row> <label>
   else
     echo "FAIL: $4 (needle '$2' last on row '${got:-none}', expected $3)"; FAIL=$((FAIL+1))
   fi
+}
+lead_spaces() { # lead_spaces <file> <needle> -> leading spaces of first row containing needle, or NOTFOUND
+  local row
+  row=$(grep -m1 -F -- "$2" "$1") || { echo "NOTFOUND"; return; }
+  printf '%s' "$row" | sed 's/[^ ].*//' | tr -d '\n' | wc -c
+}
+check_lead() { # check_lead <file> <needle> <expected> <label>
+  local got
+  got=$(lead_spaces "$1" "$2")
+  if [ "$got" = "$3" ]; then echo "PASS: $4"; PASS=$((PASS+1)); else echo "FAIL: $4 (leading spaces '${got:-none}', expected $3)"; FAIL=$((FAIL+1)); fi
+}
+dash_run() { # dash_run <file> -> number of ─ chars on the divider row (spaces + dashes + optional scrollbar char)
+  # NOTE: grep -E "^ +─+ *$" does NOT work here — in the C locale the
+  # `+` applies to the last BYTE of the 3-byte ─, so the pattern never
+  # matches. awk's gsub on the whole ─ string counts correctly. The
+  # row may carry a trailing scrollbar char (│/█) when the scrollbar
+  # shows — strip that too, it is not divider content.
+  awk '{ n=gsub(/─/, "─"); rest=$0; gsub(/[ ─│█]/, "", rest); if (n>0 && rest=="") { print n; exit } }' "$1"
+}
+check_dash_run() { # check_dash_run <file> <expected> <label>
+  local got
+  got=$(dash_run "$1")
+  if [ "$got" = "$2" ]; then echo "PASS: $3"; PASS=$((PASS+1)); else echo "FAIL: $3 (divider run $got, expected $2)"; FAIL=$((FAIL+1)); fi
 }
 reset_credentials() { # reset_credentials — fresh credentials without firstPromptSubmitted
   printf '{"apiKey":"test-key-pty","defaultModel":"glm-5.3-flash","savedAt":"2026-11-08T00:00:00Z"}' > "$METATECH_CONFIG_DIR/credentials.json"
@@ -97,6 +123,21 @@ capture() { # capture <name>
   sed 's/\x1b\[[0-9;]*m//g' "$OUTDIR/$1.txt" > "$OUTDIR/$1.plain.txt"
 }
 send() { tmux send-keys -t "$SESSION" "$@" ; sleep 0.7; }
+wheel() { # wheel <up|down> <count> — inject N SGR mouse-wheel events in one
+  # tmux write (button 64 = wheel up, 65 = wheel down, SGR 1006;
+  # coordinates 10,5 — the gesture anchor, unused by the TUI).
+  # Ink splits the burst into one useInput event per sequence, so the
+  # app sees N separate wheel ticks, exactly like a Termux fling.
+  local b2=34 i
+  [ "${1:-up}" = down ] && b2=35
+  local args=()
+  for i in $(seq 1 "${2:-1}"); do args+=(1b 5b 3c 36 "$b2" 3b 31 30 3b 35 4d); done
+  tmux send-keys -t "$SESSION" -H "${args[@]}"; sleep 1
+}
+tap() { # tap — inject one SGR left-click press+release (a Termux tap
+  # with mouse tracking on); the TUI must swallow it, never type it.
+  tmux send-keys -t "$SESSION" -H 1b 5b 3c 30 3b 31 30 3b 35 4d 1b 5b 3c 30 3b 31 30 3b 35 6d; sleep 1
+}
 stop_tui() { tmux send-keys -t "$SESSION" C-c; sleep 1; tmux kill-session -t "$SESSION" 2>/dev/null; }
 
 # --- Scenario 1: bare `methatech` opens the TUI (desktop 80x24) ---
@@ -554,6 +595,240 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
 else
   echo "PASS: s24: second Ctrl+C in the window exits"; PASS=$((PASS+1))
 fi
+
+# --- Scenario 25: text rendering showcase (0.1.8, Freebuff markdown
+# renderer adoption) ---
+# MOCK_MARKDOWN=1 makes the mock answer with a showcase of every
+# Markdown feature the TUI renders. Assert the markers are GONE
+# (rendered, not raw) and the rendered shapes are present: heading,
+# task checkboxes, blockquote "> ", table box borders, inline code,
+# link text. The mock server is a long-running child: it reads the
+# env per request, but only the env it started with — so restart it
+# after exporting MOCK_MARKDOWN.
+export MOCK_MARKDOWN=1
+restart_mock
+reset_credentials
+start_tui 80 24
+send "tampilkan ringkasan"
+send Enter
+sleep 2
+capture s25-markdown
+# Bottom view: the heading scrolled out (the Freebuff-faithful
+# renderer puts a blank line after every list/quote/table/divider,
+# so the message is 22 lines in an 18-row area — see s26/80).
+# Everything below the heading is in the bottom view; the heading
+# itself is checked in the top capture after one PgUp.
+check "$OUTDIR/s25-markdown.plain.txt" "[x] tulis tes" "s25: task list checkbox renders"
+check "$OUTDIR/s25-markdown.plain.txt" "[ ] verifikasi manual" "s25: unchecked task renders"
+check "$OUTDIR/s25-markdown.plain.txt" "> Catatan: cek README.md dulu." "s25: blockquote renders with '> '"
+check "$OUTDIR/s25-markdown.plain.txt" "│ Model │ Harga │" "s25: table header renders in box borders"
+check "$OUTDIR/s25-markdown.plain.txt" "┌" "s25: table top border renders"
+check "$OUTDIR/s25-markdown.plain.txt" "npm test" "s25: inline code renders"
+check "$OUTDIR/s25-markdown.plain.txt" "docs" "s25: link text renders"
+check_absent "$OUTDIR/s25-markdown.plain.txt" "**README.md**" "s25: no raw **bold** markers"
+check_absent "$OUTDIR/s25-markdown.plain.txt" "~~yang lama~~" "s25: no raw ~~strike~~ markers"
+check_absent "$OUTDIR/s25-markdown.plain.txt" "|---|---|" "s25: no raw table separator row"
+check_absent "$OUTDIR/s25-markdown.plain.txt" "- [x]" "s25: no raw '- [x]' list marker"
+check_absent "$OUTDIR/s25-markdown.plain.txt" "# Ringkasan" "s25: no raw '# ' heading marker"
+send PageUp
+capture s25-markdown-top
+check "$OUTDIR/s25-markdown-top.plain.txt" "Ringkasan" "s25: heading renders (top view)"
+stop_tui
+unset MOCK_MARKDOWN
+
+# --- Scenario 26: horizontal gutter (0.1.8, Freebuff SIDE_GUTTER) ---
+# Same markdown showcase, measured at 80 / 40 / 120 columns. Freebuff
+# layering (scrollbox 1 + message SIDE_GUTTER 1): message text at col
+# 2, header text at col 2, user line at col 4 (gutter + bar + space),
+# footer/status at col 1, input border at col 1 with text at col 3.
+# Divider follows the content width (74 at 80 cols when the scrollbar
+# shows, 34 at 40 cols, capped at 80 at 120 cols) and never touches
+# either edge.
+export MOCK_MARKDOWN=1
+restart_mock
+reset_credentials
+start_tui 80 24
+send "tampilkan ringkasan"
+send Enter
+sleep 2
+capture s26-gutter-80
+check_lead "$OUTDIR/s26-gutter-80.plain.txt" "MethaTech" 2 "s26/80: header text at col 2 (root 1 + header 1)"
+check_lead "$OUTDIR/s26-gutter-80.plain.txt" "┌" 2 "s26/80: table top border at col 2"
+check_lead "$OUTDIR/s26-gutter-80.plain.txt" "Agent: Default" 1 "s26/80: footer at col 1 (status-bar layer)"
+check_lead "$OUTDIR/s26-gutter-80.plain.txt" "╭" 1 "s26/80: input border at col 1"
+check "$OUTDIR/s26-gutter-80.plain.txt" " │ ▋Enter a coding task" "s26/80: input placeholder after border + padding (cursor col 3, text col 4; box unchanged)"
+# Divider is 74, not 75: the Freebuff-faithful renderer puts a blank
+# line after every list/quote/table/divider (0.1.8 §4h), so this
+# message is 22 lines in an 18-row area — the scrollbar shows and
+# the lines re-wrap 1 column narrower (same mechanism as s26/40).
+check_dash_run "$OUTDIR/s26-gutter-80.plain.txt" 74 "s26/80: divider is 74 wide when the scrollbar shows (re-wrap 1 narrower)"
+# The heading and user line scrolled out of the bottom view (4 lines
+# hidden); one PgUp reaches the top.
+send PageUp
+capture s26-gutter-80-top
+check_lead "$OUTDIR/s26-gutter-80-top.plain.txt" "Ringkasan" 2 "s26/80: heading at col 2 (root 1 + gutter 1)"
+check_lead "$OUTDIR/s26-gutter-80-top.plain.txt" "You:" 4 "s26/80: user line at col 4 (gutter + bar + space)"
+stop_tui
+start_tui 40 15
+send "tampilkan ringkasan"
+send Enter
+sleep 2
+capture s26-gutter-40
+check_lead "$OUTDIR/s26-gutter-40.plain.txt" "MethaTech" 2 "s26/40: header text at col 2 on narrow terminal"
+# At 40x15 the message area holds ~6 rows. The divider IS in the
+# bottom view; it is 34 wide, not 35 — when the scrollbar shows the
+# lines re-wrap 1 column narrower (pre-existing mechanism: the user
+# line is gutter + bar + space + text, so the text width must shrink
+# for the track to fit) and the divider follows the wrap width.
+check_dash_run "$OUTDIR/s26-gutter-40.plain.txt" 34 "s26/40: divider is 34 wide when the scrollbar shows (re-wrap 1 narrower)"
+# The message is 24 lines at 40 cols. One PgUp lands 1 line short
+# of the table top (13 hidden above); a second PgUp shows it.
+# Two more PgUps reach the top (3 hidden above after 3 PgUps).
+send PageUp
+send PageUp
+capture s26-gutter-40-mid
+check_lead "$OUTDIR/s26-gutter-40-mid.plain.txt" "┌" 2 "s26/40: table stays inside the content area"
+send PageUp
+send PageUp
+capture s26-gutter-40-top
+check_lead "$OUTDIR/s26-gutter-40-top.plain.txt" "Ringkasan" 2 "s26/40: heading at col 2 on narrow terminal"
+check_lead "$OUTDIR/s26-gutter-40-top.plain.txt" "You:" 4 "s26/40: user line at col 4 on narrow terminal"
+stop_tui
+start_tui 120 36
+send "tampilkan ringkasan"
+send Enter
+sleep 2
+capture s26-gutter-120
+check_lead "$OUTDIR/s26-gutter-120.plain.txt" "MethaTech" 2 "s26/120: header text at col 2 on wide terminal"
+check_lead "$OUTDIR/s26-gutter-120.plain.txt" "Ringkasan" 2 "s26/120: heading at col 2 on wide terminal"
+check_lead "$OUTDIR/s26-gutter-120.plain.txt" "┌" 2 "s26/120: table top border at col 2"
+check_lead "$OUTDIR/s26-gutter-120.plain.txt" "You:" 4 "s26/120: user line at col 4 on wide terminal"
+check_dash_run "$OUTDIR/s26-gutter-120.plain.txt" 80 "s26/120: divider capped at 80, content never spans edge to edge"
+stop_tui
+unset MOCK_MARKDOWN
+
+# s27 — full Markdown showcase (0.1.8 §4h), streamed in 17-char
+# chunks. Proves the parse-first renderer: no raw markers anywhere
+# (bold/italic/strike/code/fence/table), at 80 and at 40 cols where
+# the ~~ span is forced to straddle a wrap (§4g regression, live).
+export MOCK_MARKDOWN_FULL=1
+restart_mock
+reset_credentials
+start_tui 80 24
+send "tampilkan panduan"
+send Enter
+sleep 3
+capture s27-markdown-80-bottom
+check "$OUTDIR/s27-markdown-80-bottom.plain.txt" "// js" "s27/80: fenced code block renders with // lang header"
+check "$OUTDIR/s27-markdown-80-bottom.plain.txt" "console.log(x);" "s27/80: code block body renders"
+check_absent "$OUTDIR/s27-markdown-80-bottom.plain.txt" "\`\`\`" "s27/80: no raw fence markers"
+send PageUp
+send PageUp
+send PageUp
+capture s27-markdown-80-top
+check "$OUTDIR/s27-markdown-80-top.plain.txt" "Panduan Lengkap" "s27/80: H1 renders"
+check "$OUTDIR/s27-markdown-80-top.plain.txt" "teks tebal" "s27/80: bold text renders"
+check "$OUTDIR/s27-markdown-80-top.plain.txt" "1. pertama" "s27/80: numbered list renders"
+check "$OUTDIR/s27-markdown-80-top.plain.txt" "> Kutipan penting" "s27/80: blockquote renders"
+check_absent "$OUTDIR/s27-markdown-80-top.plain.txt" "**teks tebal**" "s27/80: no raw **bold** markers"
+check_absent "$OUTDIR/s27-markdown-80-top.plain.txt" "~~teks dicoret~~" "s27/80: no raw ~~strike~~ markers"
+stop_tui
+start_tui 40 15
+send "tampilkan panduan"
+send Enter
+sleep 3
+send PageUp
+send PageUp
+send PageUp
+send PageUp
+send PageUp
+send PageUp
+send PageUp
+capture s27-markdown-40-top
+check "$OUTDIR/s27-markdown-40-top.plain.txt" "teks dicoret" "s27/40: struck text survives the wrap"
+check_absent "$OUTDIR/s27-markdown-40-top.plain.txt" "~~" "s27/40: no raw ~~ markers at narrow width (§4g)"
+check_absent "$OUTDIR/s27-markdown-40-top.plain.txt" "**" "s27/40: no raw ** markers at narrow width"
+stop_tui
+# s28 — mouse wheel scrolling (0.1.8 §4i): Termux swipe / desktop
+# wheel arrives as SGR events (button 64 up / 65 down) once the TUI
+# enables mouse reporting. Wheel = 1 line per tick (Freebuff
+# LinearScrollAccel), applied immediately, no page animation; PgUp
+# behaviour is unchanged (s23/s26/s27 still cover it). A tap is
+# swallowed, never typed into the draft. Scrolling up during a
+# stream must NOT yank the view back to the bottom.
+#
+# NOTE on the indicator numbers: the "↑ N baris di atas" row shows
+# hiddenAbove = startLine of the window, and showing the row costs
+# one line of message budget — so while scrolled up,
+# hiddenAbove = maxOffset - offset + 1. At the very top
+# (offset = maxOffset) it is always exactly 1, whatever the total;
+# wheeling DOWN N from the top makes it exactly N+1. The checks
+# below anchor on the top for that reason instead of hardcoding a
+# maxOffset that depends on the mock text.
+export MOCK_MARKDOWN_FULL=1
+restart_mock
+reset_credentials
+start_tui 80 24
+send "tampilkan panduan"
+send Enter
+sleep 3
+capture s28-wheel-80-bottom
+check "$OUTDIR/s28-wheel-80-bottom.plain.txt" "console.log(x);" "s28/80: bottom view shows the code block tail"
+check_absent "$OUTDIR/s28-wheel-80-bottom.plain.txt" "Panduan Lengkap" "s28/80: H1 is above the bottom view"
+# Wheel to the top (clamped at max offset): the indicator reads
+# exactly 1, and the H1 is visible. Then down 12 (indicator 13),
+# up 5 (indicator 8) — proving 1 line per wheel event in both
+# directions — and all the way back to the bottom.
+wheel up 100
+capture s28-wheel-80-top
+check "$OUTDIR/s28-wheel-80-top.plain.txt" "↑ 1 baris di atas" "s28/80: wheel reaches the top (indicator reads 1)"
+check "$OUTDIR/s28-wheel-80-top.plain.txt" "Panduan Lengkap" "s28/80: H1 visible at the top"
+wheel down 12
+capture s28-wheel-80-down12
+check "$OUTDIR/s28-wheel-80-down12.plain.txt" "↑ 13 baris di atas" "s28/80: 12 wheel-downs from the top = indicator 13"
+check "$OUTDIR/s28-wheel-80-down12.plain.txt" "Enter a coding task" "s28/80: draft untouched after wheel (placeholder still there)"
+check_absent "$OUTDIR/s28-wheel-80-down12.plain.txt" "[<65" "s28/80: no wheel-down fragment typed into the draft"
+check_absent "$OUTDIR/s28-wheel-80-down12.plain.txt" "[<64" "s28/80: no wheel-up fragment typed into the draft"
+wheel up 5
+capture s28-wheel-80-up5
+check "$OUTDIR/s28-wheel-80-up5.plain.txt" "↑ 8 baris di atas" "s28/80: 5 wheel-ups back = indicator 8"
+wheel down 100
+capture s28-wheel-80-back
+check "$OUTDIR/s28-wheel-80-back.plain.txt" "console.log(x);" "s28/80: wheel-downs return to the bottom"
+check_absent "$OUTDIR/s28-wheel-80-back.plain.txt" "baris di atas" "s28/80: no scroll indicator at the bottom"
+# A tap (click press+release) must change nothing and type nothing.
+tap
+capture s28-wheel-80-tap
+check "$OUTDIR/s28-wheel-80-tap.plain.txt" "console.log(x);" "s28/80: tap does not move the view"
+check "$OUTDIR/s28-wheel-80-tap.plain.txt" "Enter a coding task" "s28/80: tap does not type into the draft"
+check_absent "$OUTDIR/s28-wheel-80-tap.plain.txt" "[<0" "s28/80: no click fragment typed into the draft"
+stop_tui
+# Streaming while scrolled up: wheel up mid-stream, let the stream
+# finish — the view must stay scrolled up, not yanked to the bottom.
+start_tui 80 24
+send "tampilkan panduan"
+send Enter
+sleep 1
+wheel up 15
+sleep 3
+capture s28-wheel-80-streaming
+check "$OUTDIR/s28-wheel-80-streaming.plain.txt" "baris di atas" "s28/80: still scrolled up after the stream finished (no yank)"
+check_absent "$OUTDIR/s28-wheel-80-streaming.plain.txt" "console.log(x);" "s28/80: bottom content still out of view after streaming"
+stop_tui
+# Narrow terminal: wheel works at 40 cols too (same top anchor).
+start_tui 40 15
+send "tampilkan panduan"
+send Enter
+sleep 3
+wheel up 100
+capture s28-wheel-40-top
+check "$OUTDIR/s28-wheel-40-top.plain.txt" "↑ 1 baris di atas" "s28/40: wheel reaches the top on a narrow terminal"
+wheel down 8
+capture s28-wheel-40-down8
+check "$OUTDIR/s28-wheel-40-down8.plain.txt" "↑ 9 baris di atas" "s28/40: 8 wheel-downs from the top = indicator 9"
+check_absent "$OUTDIR/s28-wheel-40-down8.plain.txt" "~~" "s28/40: no raw ~~ markers after wheel at narrow width"
+stop_tui
+unset MOCK_MARKDOWN_FULL
 
 echo ""
 echo "PTY results: PASS=$PASS FAIL=$FAIL (captures in $OUTDIR)"

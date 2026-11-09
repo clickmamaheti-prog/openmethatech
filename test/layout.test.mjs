@@ -8,6 +8,8 @@ import {
   wrapText,
   wrapLineCount,
   flattenMessages,
+  tableLines,
+  textWidth,
   inputBoxRowsFor,
   layoutBudget,
   pickerHint,
@@ -19,12 +21,24 @@ import {
   welcomeLayout,
   windowLines,
   pageScrollOffset,
+  wheelScrollOffset,
   easeOutCubic,
   scrollbarThumbRange,
+  SIDE_GUTTER,
   SCROLL_ANIMATION_DURATION_MS,
   SCROLL_ANIMATION_FRAME_MS,
 } from "../dist/ui/layout.js";
-import { theme } from "../dist/theme.js";
+// Markdown rendering lives in markdown.ts now (parse-first AST
+// pipeline, Freebuff's unified + remark stack); the old
+// inlineSegments/markdownLines regex layer is deleted.
+import {
+  parseMarkdown,
+  renderInlineText,
+  renderMarkdownText,
+  wrapSegments,
+} from "../dist/ui/markdown.js";
+import { splitMessageParts } from "../dist/ui/syntax.js";
+import { theme, markdown } from "../dist/theme.js";
 
 const CATALOG = {
   entries: [
@@ -63,15 +77,21 @@ test("flattenMessages: system/user/assistant lines + blank separator", () => {
     40,
   );
   const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
-  // User lines carry the 1-column SOLID left border (Freebuff user
-  // line): a colored space + 1 gutter space, not a "│" glyph.
-  assert.deepEqual(texts, ["sys msg", " ", "  You: hi", " ", "hello there", " "]);
-  // Border segment first (solid bar, userLine bg), then gutter space,
-  // then the "You: " label with its own color.
+  // Every line carries the 1-column SIDE_GUTTER prefix (Freebuff
+  // message-with-agents.tsx:105); the user line is gutter + bar +
+  // space, so "You:" starts 3 spaces in. User lines carry the
+  // 1-column SOLID left border (Freebuff user line): a colored space
+  // + 1 gutter space, not a "│" glyph.
+  assert.deepEqual(texts, [" sys msg", "  ", "   You: hi", "  ", " hello there", "  "]);
+  // Gutter first (plain space), then the border segment (solid bar,
+  // userLine bg), then the gutter space after the bar, then the
+  // "You: " label with its own color.
   assert.equal(lines[2].segments[0].text, " ");
-  assert.equal(lines[2].segments[0].backgroundColor, theme.userLine);
+  assert.equal(lines[2].segments[0].backgroundColor, undefined);
   assert.equal(lines[2].segments[1].text, " ");
-  assert.equal(lines[2].segments[2].text, "You: ");
+  assert.equal(lines[2].segments[1].backgroundColor, theme.userLine);
+  assert.equal(lines[2].segments[2].text, " ");
+  assert.equal(lines[2].segments[3].text, "You: ");
 });
 
 test("flattenMessages: session-start system block (2 lines, muted, no label)", () => {
@@ -91,11 +111,11 @@ test("flattenMessages: session-start system block (2 lines, muted, no label)", (
   );
   const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
   assert.deepEqual(texts, [
-    "New conversation started (session: 2026-11-08T21-00-00.000Z).",
-    "Model set to glm-5.3-flash · FREE $0.00 · Balance $0.0000.",
-    " ",
+    " New conversation started (session: 2026-11-08T21-00-00.000Z).",
+    " Model set to glm-5.3-flash · FREE $0.00 · Balance $0.0000.",
+    "  ",
   ]);
-  assert.equal(lines[0].segments[0].color, theme.muted);
+  assert.equal(lines[0].segments[1].color, theme.muted, "content segment after the gutter is muted");
   assert.ok(!texts.join("\n").includes("Muse:"));
 });
 
@@ -120,8 +140,8 @@ test("flattenMessages: timestamp [HH:MM] above a message + inline Markdown", () 
     40,
   );
   const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
-  assert.ok(texts[0].match(/^\[\d\d:\d\d\]$/), `timestamp line: ${texts[0]}`);
-  assert.ok(texts.includes("  You: hi"));
+  assert.ok(texts[0].match(/^ \[\d\d:\d\d\]$/), `timestamp line: ${texts[0]}`);
+  assert.ok(texts.includes("   You: hi"));
   const boldLine = lines.find((l) => l.segments.some((s) => s.bold === true && s.text === "bold"));
   assert.ok(boldLine, "inline **bold** becomes a bold segment");
   // Freebuff markdown-renderer.tsx: inline `code` is BOLD, space-padded,
@@ -154,11 +174,12 @@ test("flattenMessages: code block is Freebuff monochrome on gray + // lang heade
     40,
   );
   const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
-  assert.equal(texts[0], "// js");
+  assert.equal(texts[0], " // js");
   assert.ok(texts[1].includes("const"));
-  // Body: one color, one background, no per-token colors.
-  assert.ok(lines[1].segments.every((s) => s.color === "#f1f5f9"));
-  assert.ok(lines[1].segments.every((s) => s.backgroundColor === "#374151"));
+  // Body: one color, one background, no per-token colors (segments[0]
+  // is the plain SIDE_GUTTER space, so the body is segments[1..]).
+  assert.ok(lines[1].segments.slice(1).every((s) => s.color === "#f1f5f9"));
+  assert.ok(lines[1].segments.slice(1).every((s) => s.backgroundColor === "#374151"));
 });
 
 test("flattenMessages: to-do list renders Freebuff-style (header, boxes, strikethrough)", () => {
@@ -203,9 +224,9 @@ test("flattenMessages: assistant block has NO timestamp (Freebuff message-block)
     40,
   );
   const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
-  assert.ok(!texts.some((t) => /^\[\d\d:\d\d\]$/.test(t)), "no timestamp line on the assistant block");
+  assert.ok(!texts.some((t) => /^ \[\d\d:\d\d\]$/.test(t)), "no timestamp line on the assistant block");
   assert.ok(!texts.some((t) => t.includes("Muse:")), "no Muse: label on the assistant block (Freebuff shows the answer directly)");
-  assert.equal(texts[0], "answer");
+  assert.equal(texts[0], " answer");
 });
 
 test("inputBoxRowsFor: 2 borders + content rows + palette rows inside", () => {
@@ -224,10 +245,10 @@ test("flattenMessages: reasoning renders as a Thinking block before the answer",
   assert.ok(texts[0].includes("Thinking"), `first line is the block header: ${texts[0]}`);
   // Preview = last 5 visual lines, earlier lines cut off with "...".
   assert.ok(texts.some((t) => t.includes("line 8")));
-  assert.ok(texts.some((t) => t.startsWith("  ...")), "cut-off preview is prefixed ...");
+  assert.ok(texts.some((t) => t.startsWith("   ...")), "cut-off preview is prefixed ...");
   assert.ok(!texts.some((t) => t.includes("reasoning line 1")), "first lines are cut from the preview");
   assert.ok(!texts.includes("Muse:"), "no Muse: label before the answer");
-  assert.ok(texts.includes("answer"));
+  assert.ok(texts.includes(" answer"));
 });
 
 test("flattenMessages: one blank line between the Thinking block and the answer (Freebuff message-block gap: 1)", () => {
@@ -241,7 +262,7 @@ test("flattenMessages: one blank line between the Thinking block and the answer 
   assert.ok(texts[0].includes("Thinking"));
   assert.ok(texts[1].includes("short reasoning"));
   assert.equal(texts[2].trim(), "", "blank line separates the Thinking block from the answer");
-  assert.equal(texts[3], "answer");
+  assert.equal(texts[3], " answer");
 });
 
 test("flattenMessages: no gap blank line when the answer is empty (still streaming)", () => {
@@ -263,7 +284,7 @@ test("flattenMessages: lone **bold** reasoning under 100 chars is hidden", () =>
   );
   const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
   assert.ok(!texts.some((t) => t.includes("Thinking")));
-  assert.ok(texts.includes("answer"));
+  assert.ok(texts.includes(" answer"));
 });
 
 test("flattenMessages: code block keeps lang line + token colors", () => {
@@ -272,7 +293,7 @@ test("flattenMessages: code block keeps lang line + token colors", () => {
     40,
   );
   const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
-  assert.equal(texts[0], "// js");
+  assert.equal(texts[0], " // js");
   assert.ok(texts[1].includes("const"));
   assert.ok(lines[1].segments.some((s) => s.color));
 });
@@ -370,6 +391,21 @@ test("pageScrollOffset: 0.8 viewport page, clamped both ends", () => {
   assert.equal(pageScrollOffset(0, "up", 10, 5), 0); // fits already
 });
 
+test("wheelScrollOffset: 1 line per wheel tick, clamped both ends", () => {
+  // Freebuff LinearScrollAccel: one wheel event = one line. A fling
+  // sends many events; each applies one step from the live offset.
+  assert.equal(wheelScrollOffset(0, "up", 1, 10, 30), 1);
+  assert.equal(wheelScrollOffset(1, "up", 1, 10, 30), 2);
+  assert.equal(wheelScrollOffset(19, "up", 1, 10, 30), 20); // max = 30-10
+  assert.equal(wheelScrollOffset(20, "up", 1, 10, 30), 20); // clamped
+  assert.equal(wheelScrollOffset(20, "down", 1, 10, 30), 19);
+  assert.equal(wheelScrollOffset(1, "down", 1, 10, 30), 0);
+  assert.equal(wheelScrollOffset(0, "down", 1, 10, 30), 0); // clamped
+  assert.equal(wheelScrollOffset(0, "up", 1, 10, 5), 0); // fits already
+  assert.equal(wheelScrollOffset(5, "up", 3, 10, 30), 8); // burst of 3
+  assert.equal(wheelScrollOffset(5, "down", 3, 10, 30), 2);
+  assert.equal(wheelScrollOffset(0, "up", 0, 10, 30), 0); // 0 lines = noop
+});
 test("bannerLines: MethaTech wordmark, 5 rows, uniform width", () => {
   const rows = bannerLines("MethaTech");
   assert.equal(rows.length, 5);
@@ -499,4 +535,488 @@ test("scrollbarThumbRange: proportional thumb, at least one row, empty without o
   const bottom = scrollbarThumbRange(100, 10, 90, 100);
   assert.equal(bottom.end, 10);
   assert.ok(bottom.start < bottom.end);
+});
+
+// ---------------------------------------------------------------------------
+// Horizontal gutter (0.1.8): Freebuff message-with-agents.tsx:105
+// SIDE_GUTTER = 1 on top of the scroll container padding.
+// ---------------------------------------------------------------------------
+
+test("SIDE_GUTTER: 1 column, same as Freebuff message-with-agents.tsx:105", () => {
+  assert.equal(SIDE_GUTTER, 1);
+});
+
+test("flattenMessages: every line starts with exactly the SIDE_GUTTER prefix", () => {
+  const lines = flattenMessages(
+    [
+      { role: "user", content: "tampilkan ringkasan", kind: "chat", ts: Date.UTC(2026, 10, 9, 12, 0) },
+      {
+        role: "assistant",
+        content: "# Ringkasan\nHasil *pemeriksaan* selesai.\n\n---\n| A | B |\n|---|---|\n| 1 | 2 |",
+        kind: "chat",
+      },
+    ],
+    40,
+  );
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  // Assistant text, heading, divider, table — all start 1 space in;
+  // the user line starts gutter + bar + space (3 spaces before You:).
+  for (const t of texts) assert.ok(t.startsWith(" "), `line misses the gutter: ${JSON.stringify(t)}`);
+  assert.ok(texts.some((t) => t.startsWith(" Ringkasan")), "heading starts after the gutter");
+  assert.ok(texts.some((t) => t.startsWith(" ┌")), "table top border starts after the gutter");
+  assert.ok(texts.some((t) => /^ ─+$/.test(t)), "divider starts after the gutter");
+  assert.ok(texts.some((t) => t.startsWith("   You: ")), "user line is gutter + bar + space");
+  assert.ok(texts.some((t) => t.startsWith(" [")), "timestamp starts after the gutter");
+  // The gutter is a plain segment (no color), so it never changes the
+  // palette — colors live on the content segments after it.
+  assert.ok(lines.every((l) => l.segments[0].text === " " && l.segments[0].color === undefined));
+});
+
+test("flattenMessages: gutter never pushes a line past width + SIDE_GUTTER", () => {
+  // Narrow terminal (40 cols): long words still wrap inside the text
+  // width, so the visual line (gutter + text) never exceeds width + 1.
+  const lines = flattenMessages(
+    [{ role: "assistant", content: "kata yang sangat panjang sekali dan terus berlanjut", kind: "chat" }],
+    20,
+  );
+  for (const l of lines) {
+    const w = textWidth(l.segments.map((s) => s.text).join(""));
+    assert.ok(w <= 20 + SIDE_GUTTER, `line overflows: ${w} > ${20 + SIDE_GUTTER}`);
+  }
+  // Tiny width: wrap still terminates, no empty-line blowup.
+  const tiny = flattenMessages([{ role: "assistant", content: "abcdefghij", kind: "chat" }], 4);
+  assert.ok(tiny.length > 0 && tiny.length < 10);
+});
+
+// ---------------------------------------------------------------------------
+// Text rendering adoption (0.1.8): Freebuff markdown renderer, semantic
+// colors, typography — cli/src/utils/markdown-renderer.tsx +
+// theme-system.ts (dark theme palette).
+// ---------------------------------------------------------------------------
+
+test("textWidth: wide CJK/emoji chars count 2 cells, combining marks 0", () => {
+  assert.equal(textWidth("abc"), 3);
+  assert.equal(textWidth("你好"), 4);
+  assert.equal(textWidth("a😀b"), 4);
+  assert.equal(textWidth("é"), 1); // e + combining acute
+  assert.equal(textWidth("✓"), 1);
+});
+
+test("wrapText: wide chars wrap at the right column, never split mid-char", () => {
+  assert.deepEqual(wrapText("你好世界", 4), ["你好", "世界"]);
+  assert.deepEqual(wrapText("ab你好cd", 4), ["ab你", "好cd"]);
+});
+
+test("renderInlineText: *italic* and _italic_ render ITALIC, **bold** stays bold", () => {
+  const segs = renderInlineText("a *miring* b _juga_ c **tebal** d");
+  const italic = segs.filter((s) => s.italic === true).map((s) => s.text);
+  assert.deepEqual(italic, ["miring", "juga"]);
+  const bold = segs.filter((s) => s.bold === true).map((s) => s.text);
+  assert.deepEqual(bold, ["tebal"]);
+  // Markers never leak into the visible text.
+  assert.ok(!segs.some((s) => s.text.includes("*") || s.text.includes("_")));
+});
+
+test("renderInlineText: ~~strike~~ renders DIM (Freebuff delete case)", () => {
+  const segs = renderInlineText("hapus ~~ini~~ saja");
+  const dim = segs.filter((s) => s.dim === true).map((s) => s.text);
+  assert.deepEqual(dim, ["ini"]);
+});
+
+test("renderInlineText: ***bold+italic*** is both, __bold__ is bold", () => {
+  const both = renderInlineText("***keduanya***").find((s) => s.text === "keduanya");
+  assert.equal(both.bold, true);
+  assert.equal(both.italic, true);
+  const under = renderInlineText("__garis__ bawah").find((s) => s.text === "garis");
+  assert.equal(under.bold, true);
+});
+
+test("renderInlineText: intraword _ stays literal, * follows CommonMark (Freebuff parity)", () => {
+  // Behaviour CHANGE from the old hand-rolled regex (docs §4h):
+  // remark follows CommonMark — `_` between word characters can
+  // never open emphasis, but `*` can, so a*b*c italicises the b
+  // exactly like Freebuff renders it. `2*3` has no closing marker
+  // and stays literal.
+  const segs = renderInlineText("some_variable dan a*b*c dan 2*3");
+  // Markers are consumed by the parse (the joined text has no
+  // asterisks left around the b); the visible text is the input
+  // minus its emphasis markers.
+  assert.equal(segs.map((s) => s.text).join(""), "some_variable dan abc dan 2*3");
+  assert.ok(!segs.some((s) => s.text.includes("_") && (s.italic === true || s.bold === true)));
+  const italic = segs.filter((s) => s.italic === true).map((s) => s.text);
+  assert.deepEqual(italic, ["b"]);
+  assert.ok(segs.some((s) => s.text.includes("2*3")));
+});
+
+test("renderInlineText: inline code is orange bold on gray (Freebuff palette)", () => {
+  const segs = renderInlineText("pakai `npm test` ya");
+  const code = segs.find((s) => s.text === " npm test ");
+  assert.ok(code, "code segment is space-padded");
+  assert.equal(code.color, markdown.inlineCodeFg);
+  assert.equal(code.backgroundColor, markdown.codeBackground);
+  assert.equal(code.bold, true);
+});
+
+test("renderInlineText: Freebuff inline fallback parses Other**.github/**", () => {
+  // remark leaves this as one literal text node (CommonMark rules);
+  // Freebuff's parseInlineFallback splits it into bold (ported).
+  const segs = renderInlineText("Other**.github/** end");
+  const bold = segs.find((s) => s.text === ".github/");
+  assert.ok(bold && bold.bold === true, "fallback bold span renders");
+  assert.ok(!segs.some((s) => s.text.includes("**")));
+});
+
+test("renderInlineText: unclosed ** stays literal (streaming transient), closed renders bold", () => {
+  const open = renderInlineText("ini **tebal belum tutup");
+  assert.equal(open.map((s) => s.text).join(""), "ini **tebal belum tutup");
+  assert.ok(!open.some((s) => s.bold === true));
+  const closed = renderInlineText("ini **tebal** sudah");
+  const bold = closed.find((s) => s.text === "tebal");
+  assert.ok(bold && bold.bold === true);
+  assert.ok(!closed.some((s) => s.text.includes("**")));
+});
+
+test("renderInlineText: escapes stay literal, autolink renders blue", () => {
+  const esc = renderInlineText("bintang \\* literal dan \\`backtick\\`.");
+  assert.equal(esc.map((s) => s.text).join(""), "bintang * literal dan `backtick`.");
+  const auto = renderInlineText("Kunjungi https://example.com ya.");
+  const link = auto.find((s) => s.text === "https://example.com");
+  assert.ok(link && link.color === markdown.linkFg);
+});
+
+test("renderMarkdownText: heading parses inline code inside (Freebuff: heading span + inline nodes)", () => {
+  const { lines } = renderMarkdownText("## Pakai `npm test` dulu", 40);
+  const code = lines.flatMap((l) => l.segments).find((s) => s.text === " npm test ");
+  assert.ok(code, "inline code inside a heading renders as code");
+  assert.equal(code.color, markdown.inlineCodeFg);
+  // Every heading segment is bold + yellow.
+  assert.ok(lines.flatMap((l) => l.segments).every((s) => s.bold === true));
+  assert.ok(lines.flatMap((l) => l.segments).every((s) => s.color === markdown.inlineCodeFg || s.color === markdown.headingFg));
+});
+
+test("renderMarkdownText: blockquote uses '> ' in border color (Freebuff renderBlockquote)", () => {
+  const { lines } = renderMarkdownText("> catatan penting", 40);
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  assert.deepEqual(texts, ["> catatan penting"]);
+  assert.equal(lines[0].segments[0].text, "> ");
+  assert.equal(lines[0].segments[0].color, markdown.blockquoteBorderFg);
+  assert.equal(lines[0].segments[1].color, markdown.blockquoteTextFg);
+});
+
+test("renderMarkdownText: blockquote parses inline markdown inside", () => {
+  const { lines } = renderMarkdownText("> baca **panduan** dulu", 40);
+  const bold = lines.flatMap((l) => l.segments).find((s) => s.text === "panduan");
+  assert.ok(bold && bold.bold === true);
+});
+
+test("renderMarkdownText: task list checkboxes + inline parsing in list items", () => {
+  const { lines: done } = renderMarkdownText("- [x] tulis **tes** dulu", 40);
+  const texts = done.map((l) => l.segments.map((s) => s.text).join(""));
+  assert.deepEqual(texts, ["[x] tulis tes dulu"]);
+  const bold = done.flatMap((l) => l.segments).find((s) => s.text === "tes");
+  assert.ok(bold && bold.bold === true);
+  const { lines: todo } = renderMarkdownText("- [ ] belum dikerjakan", 40);
+  assert.equal(todo.map((l) => l.segments.map((s) => s.text).join(""))[0], "[ ] belum dikerjakan");
+});
+
+test("renderMarkdownText: nested lists indent under their parent item", () => {
+  const { lines } = renderMarkdownText("- induk\n  - anak satu\n  - anak dua\n- induk dua", 40);
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  assert.deepEqual(texts, ["- induk", "  - anak satu", "  - anak dua", "- induk dua"]);
+});
+
+test("renderMarkdownText: ordered list numbers from its start", () => {
+  const { lines } = renderMarkdownText("3. ketiga\n4. keempat", 40);
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  assert.deepEqual(texts, ["3. ketiga", "4. keempat"]);
+});
+
+test("renderMarkdownText: divider is capped at 80 (Freebuff thematicBreak)", () => {
+  const { lines } = renderMarkdownText("---", 120);
+  const text = lines[0].segments.map((s) => s.text).join("");
+  assert.equal(text.length, 80);
+  assert.ok(/^─+$/.test(text));
+});
+
+// §4h — the leak that motivated this whole task (docs §4g): the old
+// wrap-first renderer leaked raw ~~ markers whenever the wrap fell
+// inside a span, at widths 34, 35 and 36. Parse-first must not leak
+// at ANY width.
+test("renderMarkdownText: no raw ~~ markers leak at widths 34, 35, 36 (§4g regression)", () => {
+  for (const w of [34, 35, 36, 40, 80]) {
+    const { lines } = renderMarkdownText("Hasil pemeriksaan dan ~~yang lama~~ sudah diperbarui.", w);
+    const joined = lines.map((l) => l.segments.map((s) => s.text).join("")).join("\n");
+    assert.ok(!joined.includes("~~"), `width ${w}: no raw ~~ in ${JSON.stringify(joined)}`);
+    assert.ok(joined.includes("yang lama"), `width ${w}: struck text survives`);
+    const dim = lines.flatMap((l) => l.segments).filter((s) => s.dim === true).map((s) => s.text);
+    assert.ok(dim.join("").includes("yang lama"), `width ${w}: strike renders DIM`);
+  }
+});
+
+test("renderMarkdownText: no raw ** markers leak when a bold span wraps", () => {
+  for (const w of [20, 25, 30, 34, 40]) {
+    const { lines } = renderMarkdownText("Periksa **panduan instalasi lengkap** sebelum lanjut.", w);
+    const joined = lines.map((l) => l.segments.map((s) => s.text).join("")).join("\n");
+    assert.ok(!joined.includes("**"), `width ${w}: no raw ** in ${JSON.stringify(joined)}`);
+  }
+});
+
+test("renderMarkdownText: no raw `code` markers leak when inline code wraps", () => {
+  for (const w of [20, 24, 30, 40]) {
+    const { lines } = renderMarkdownText("Jalankan `npm run build --workspace api` dulu.", w);
+    const joined = lines.map((l) => l.segments.map((s) => s.text).join("")).join("\n");
+    assert.ok(!joined.includes("`"), `width ${w}: no raw backtick in ${JSON.stringify(joined)}`);
+  }
+});
+
+test("wrapSegments: over-long word hard-splits by cells, styles survive", () => {
+  const lines = wrapSegments([{ text: "abcdefghij", bold: true }], 4);
+  assert.deepEqual(
+    lines.map((l) => l.segments.map((s) => s.text).join("")),
+    ["abcd", "efgh", "ij"],
+  );
+  assert.ok(lines.every((l) => l.segments.every((s) => s.bold === true)));
+});
+
+test("wrapSegments: first/cont prefixes come out of the line budget", () => {
+  const lines = wrapSegments([{ text: "satu dua tiga empat" }], 10, {
+    firstPrefix: [{ text: "- " }],
+    contPrefix: [{ text: "  " }],
+  });
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  assert.deepEqual(texts, ["- satu dua", "  tiga", "  empat"]);
+});
+
+test("tableLines: box-drawing table, header bold yellow, borders divider color", () => {
+  const lines = tableLines(["| Model | Harga |", "|---|---|", "| glm | $0.00 |", "| qwen | $0.10 |"], 40);
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  assert.deepEqual(texts, [
+    "┌───────┬───────┐",
+    "│ Model │ Harga │",
+    "├───────┼───────┤",
+    "│ glm   │ $0.00 │",
+    "│ qwen  │ $0.10 │",
+    "└───────┴───────┘",
+  ]);
+  // Header cells bold + heading color.
+  const headerSeg = lines[1].segments.find((s) => s.text === "Model");
+  assert.equal(headerSeg.bold, true);
+  assert.equal(headerSeg.color, markdown.headingFg);
+  // Border lines in divider color.
+  assert.equal(lines[0].segments[0].color, markdown.dividerFg);
+});
+
+test("tableLines: long cells wrap and shrink to fit the terminal width", () => {
+  const lines = tableLines(
+    ["| A | B |", "|---|---|", "| kata yang sangat panjang sekali | pendek |"],
+    30,
+  );
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  for (const t of texts) assert.ok(textWidth(t) <= 30, `row fits: ${t}`);
+  assert.ok(texts.some((t) => t.includes("kata yang")));
+  assert.ok(texts.some((t) => t.includes("panjang sekali")));
+});
+
+test("tableLines: right-aligned column pads on the left", () => {
+  const lines = tableLines(["| Item | Harga |", "|---|---:|", "| a | $1 |"], 30);
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  assert.ok(texts.some((t) => t.includes("│    $1 │")), `right-aligned: ${JSON.stringify(texts)}`);
+});
+
+test("flattenMessages: no blank line between a paragraph and a following list (Freebuff tight followup)", () => {
+  const lines = flattenMessages(
+    [{ role: "assistant", content: "Langkahnya:\n- satu\n- dua", kind: "chat" }],
+    40,
+  );
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  assert.deepEqual(texts, [" Langkahnya:", " - satu", " - dua", "  "]);
+});
+
+test("flattenMessages: no blank line before a blockquote or a heading either", () => {
+  const lines = flattenMessages(
+    [{ role: "assistant", content: "Catatan:\n> hati-hati\n\nJudul berikut:\n## Bagian", kind: "chat" }],
+    40,
+  );
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  assert.deepEqual(texts, [" Catatan:", " > hati-hati", "  ", " Judul berikut:", " Bagian", "  "]);
+});
+
+test("flattenMessages: paragraph-to-paragraph keeps exactly one blank line", () => {
+  const lines = flattenMessages(
+    [{ role: "assistant", content: "Paragraf satu.\n\nParagraf dua.", kind: "chat" }],
+    40,
+  );
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  assert.deepEqual(texts, [" Paragraf satu.", "  ", " Paragraf dua.", "  "]);
+});
+
+test("flattenMessages: a table renders inline, tight after its intro line", () => {
+  const lines = flattenMessages(
+    [{ role: "assistant", content: "Perbandingan:\n| A | B |\n|---|---|\n| 1 | 2 |", kind: "chat" }],
+    40,
+  );
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  assert.deepEqual(texts, [" Perbandingan:", " ┌───┬───┐", " │ A │ B │", " ├───┼───┤", " │ 1 │ 2 │", " └───┴───┘", "  "]);
+});
+
+test("flattenMessages: long shell preview word-wraps, never splits mid-word", () => {
+  const lines = flattenMessages(
+    [
+      {
+        role: "assistant",
+        content: "$ touch agent-ran.txt",
+        kind: "tool",
+        tool: {
+          name: "run_terminal_command",
+          preview: "$ touch agent-ran.txt && echo line1 && echo line2 && echo line3 && echo line4 && echo hello-agent",
+          shell: true,
+          results: [],
+        },
+      },
+    ],
+    40,
+  );
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  assert.deepEqual(texts, [
+    " $ touch agent-ran.txt && echo line1 &&",
+    "   echo line2 && echo line3 && echo line4",
+    "   && echo hello-agent",
+    "  ",
+  ]);
+  // The "$ " prefix is green + bold on the first line only.
+  const dollar = lines.flatMap((l) => l.segments).find((s) => s.text === "$ ");
+  assert.equal(dollar.color, theme.success);
+  assert.equal(dollar.bold, true);
+});
+
+test("flattenMessages: structured tool message — shell preview $ green + bold, ✓ green / ✗ red", () => {
+  const lines = flattenMessages(
+    [
+      {
+        role: "assistant",
+        content: "$ ls",
+        kind: "tool",
+        tool: {
+          name: "run_terminal_command",
+          preview: "$ ls -la",
+          shell: true,
+          results: [
+            { ok: true, text: "README.md" },
+            { ok: false, text: "permission denied" },
+          ],
+        },
+      },
+    ],
+    40,
+  );
+  const segs = lines.flatMap((l) => l.segments);
+  const dollar = segs.find((s) => s.text === "$ ");
+  assert.ok(dollar, "$ prefix renders");
+  assert.equal(dollar.color, theme.success);
+  assert.equal(dollar.bold, true);
+  const cmd = segs.find((s) => s.text === "ls -la");
+  assert.equal(cmd.bold, true);
+  const ok = segs.find((s) => s.text === "✓ ");
+  assert.equal(ok.color, theme.success);
+  const bad = segs.find((s) => s.text === "✗ ");
+  assert.equal(bad.color, theme.error);
+  const badText = segs.find((s) => s.text === "permission denied");
+  assert.equal(badText.color, theme.error);
+  // No raw markers or duplicated prefixes in the visible text.
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  assert.deepEqual(texts, [" $ ls -la", "   ✓ README.md", "   ✗ permission denied", "  "]);
+});
+
+test("flattenMessages: structured non-shell tool preview is bold foreground", () => {
+  const lines = flattenMessages(
+    [
+      {
+        role: "assistant",
+        content: "Read README.md",
+        kind: "tool",
+        tool: { name: "read_files", preview: "Read README.md", shell: false, results: [{ ok: true, text: "120 lines" }] },
+      },
+    ],
+    40,
+  );
+  const preview = lines.flatMap((l) => l.segments).find((s) => s.text === "Read README.md");
+  assert.equal(preview.bold, true);
+  assert.equal(preview.color, theme.text);
+});
+
+test("flattenMessages: user message parses inline markdown (Freebuff user markdown)", () => {
+  const lines = flattenMessages(
+    [{ role: "user", content: "cek **README.md** dan `package.json`", kind: "chat" }],
+    40,
+  );
+  const bold = lines.flatMap((l) => l.segments).find((s) => s.text === "README.md");
+  assert.ok(bold && bold.bold === true && bold.italic === true, "user bold stays italic too");
+  const code = lines.flatMap((l) => l.segments).find((s) => s.text === " package.json ");
+  assert.ok(code, "user inline code renders");
+  assert.equal(code.italic, true);
+  const label = lines.flatMap((l) => l.segments).find((s) => s.text === "You: ");
+  assert.equal(label.italic, undefined, "the You: label itself is not italic");
+});
+
+test("flattenMessages: ANSI escapes in model text never reach the terminal", () => {
+  const lines = flattenMessages(
+    [
+      {
+        role: "assistant",
+        content: "hasilnya \x1b[31mmerah\x1b[0m dan \x1b]8;;https://evil.example\x1b\\tautan\x1b]8;;\x1b\\ palsu",
+        kind: "chat",
+      },
+    ],
+    60,
+  );
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  assert.deepEqual(texts, [" hasilnya merah dan tautan palsu", "  "]);
+  assert.ok(!texts.join("").includes("\x1b"), "no escape byte survives");
+});
+
+test("flattenMessages: ANSI escapes in tool output never reach the terminal", () => {
+  const lines = flattenMessages(
+    [
+      {
+        role: "assistant",
+        content: "$ cat file",
+        kind: "tool",
+        tool: {
+          name: "run_terminal_command",
+          preview: "$ cat file",
+          shell: true,
+          results: [{ ok: true, text: "clean\x1b[31mred\x1b[0m text" }],
+        },
+      },
+    ],
+    40,
+  );
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  assert.deepEqual(texts, [" $ cat file", "   ✓ cleanred text", "  "]);
+});
+
+test("flattenMessages: one blank line between intro text and a following code block", () => {
+  const lines = flattenMessages(
+    [{ role: "assistant", content: "Contohnya:\n```js\nconst a = 1;\n```", kind: "chat" }],
+    40,
+  );
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  assert.deepEqual(texts, [" Contohnya:", "  ", " // js", " const a = 1;", "  "]);
+});
+
+test("splitMessageParts: unclosed fence is a code part (Freebuff pending fence renders raw)", () => {
+  const parts = splitMessageParts("Intro **tebal**\n```js\nconst a = 1;\n// **bukan bold**");
+  assert.equal(parts.length, 2);
+  assert.equal(parts[0].type, "text");
+  assert.equal(parts[1].type, "code");
+  assert.equal(parts[1].lang, "js");
+  assert.ok(parts[1].content.includes("// **bukan bold**"));
+  // And the fence content is never markdown-parsed by the layout.
+  const lines = flattenMessages(
+    [{ role: "assistant", content: "Intro **tebal**\n```js\nconst a = 1;\n// **bukan bold**", kind: "chat" }],
+    40,
+  );
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  assert.ok(texts.includes(" // js"), "pending fence shows its // lang header");
+  assert.ok(!lines.flatMap((l) => l.segments).some((s) => s.text === "bukan bold" && s.bold === true));
 });

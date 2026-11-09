@@ -3,6 +3,9 @@
 // Usage: node test/mock-server.mjs [port]  (default 18099)
 // Env: MOCK_PORT, MOCK_SSE_FIRST_DELAY_MS (delay before the first SSE
 // chunk, default 60 — raise it to observe the Thinking indicator).
+// MOCK_MARKDOWN=1: plain response showcasing the text rendering
+// (heading, italic, strikethrough, task list, blockquote, table,
+// divider, inline code, link) for the tui-pty s25 scenario.
 import http from "node:http";
 
 const PORT = Number(process.env.MOCK_PORT ?? process.argv[2] ?? 18099);
@@ -72,6 +75,63 @@ const server = http.createServer((req, res) => {
         `<codebuff_tool_call>\n{"cb_tool_name": "task_completed", "summary": "selesai"}\n</codebuff_tool_call>\n# Selesai\nFile \`hello.txt\` sudah diedit. Jalankan \`npm test\` untuk verifikasi. Lihat [docs](https://example.com) bila perlu.\n\`\`\`sh\nnpm test\n\`\`\``,
       ];
       const full = texts[Math.min(agentReq - 1, texts.length - 1)];
+      chunks = [];
+      for (let i = 0; i < full.length; i += 17) {
+        chunks.push({ choices: [{ delta: { content: full.slice(i, i + 17) } }] });
+      }
+      chunks.push({
+        choices: [{ delta: {}, finish_reason: "stop" }],
+        usage: { prompt_tokens: 10, completion_tokens: 8, total_tokens: 18 },
+      });
+    } else if (process.env.MOCK_MARKDOWN) {
+      // Text-rendering showcase (0.1.8): every Markdown feature the
+      // TUI renders — heading, italic, strikethrough, task list,
+      // blockquote, table, divider, inline code, link. No tool calls,
+      // so the agent loop returns it as plain final text.
+      chunks = [
+        {
+          choices: [
+            {
+              delta: {
+                content:
+                  "# Ringkasan\nHasil *pemeriksaan* dan ~~yang lama~~ sudah diperbarui.\n- [x] tulis tes\n- [ ] verifikasi manual\n> Catatan: cek **README.md** dulu.\n",
+              },
+            },
+          ],
+        },
+        {
+          choices: [
+            {
+              delta: {
+                content:
+                  // Blank line before the table: CommonMark lazy
+                  // continuation would otherwise swallow the table
+                  // rows into the blockquote above (a table cannot
+                  // interrupt a quote without a blank line — the
+                  // same parse Freebuff's renderer produces). A
+                  // real model response separates blocks with
+                  // blank lines; the mock must too.
+                  "\n| Model | Harga |\n|---|---:|\n| glm | $0.00 |\n| qwen | $0.10 |\n---\nPakai `npm test` untuk verifikasi. Lihat [docs](https://example.com).",
+              },
+            },
+          ],
+        },
+        {
+          choices: [{ delta: {}, finish_reason: "stop" }],
+          usage: { prompt_tokens: 10, completion_tokens: 8, total_tokens: 18 },
+        },
+      ];
+    } else if (process.env.MOCK_MARKDOWN_FULL) {
+      // Full-syntax showcase (0.1.8 §4h): every Markdown construct
+      // the TUI must render — H1/H2, bold, italic, strikethrough,
+      // bold+italic, inline code, task list, plain list, numbered
+      // list, multi-line blockquote, 3-column table, divider,
+      // fenced code block, link. Sent in 17-char chunks like
+      // MOCK_AGENT, so emphasis spans and the fence arrive SPLIT
+      // across stream chunks — a half-written **bold or ``` must
+      // never stick as raw markers in the final render.
+      const full =
+        "# Panduan Lengkap\n\nIni **teks tebal** dan *teks miring* dan ~~teks dicoret~~ dan ***keduanya***. Pakai `npm test` untuk verifikasi.\n\n## Daftar Tugas\n\n- [x] tulis tes\n- [ ] verifikasi manual\n- item biasa dengan **bold**\n\n1. pertama\n2. kedua\n\n> Kutipan penting: cek **README.md** dulu.\n> Baris kedua kutipan.\n\n| Model | Harga | Keterangan |\n|---|---|---|\n| glm | $0.00 | gratis |\n| qwen | $0.10 | murah sekali untuk dipakai harian |\n\n---\n\n```js\nconst x = 1;\nconsole.log(x);\n```\n\nLihat [docs](https://example.com) untuk detail.";
       chunks = [];
       for (let i = 0; i < full.length; i += 17) {
         chunks.push({ choices: [{ delta: { content: full.slice(i, i + 17) } }] });

@@ -28,6 +28,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { discoverSkills, formatAvailableSkillsXml, loadSkill } from "./skills.js";
+import { sanitizeTerminalText } from "../ui/terminal-safe.js";
 
 export const TOOL_OUTPUT_LIMIT = 50_000;
 export const MAX_TERMINAL_TIMEOUT_SECONDS = 600;
@@ -621,34 +622,51 @@ export function toolDescriptionsFor(names: readonly string[], cwd: string): stri
   return lines.join("\n");
 }
 
-/** One-line TUI preview per tool call (Freebuff collapsedPreview pattern). */
+/** One-line TUI preview per tool call (Freebuff collapsedPreview pattern).
+    Display-only (the preview never enters the model history), and its
+    arguments are model-chosen text — a file path or a shell command can
+    carry an escape sequence — so the preview is sanitized here, at the
+    source, before any event carries it to the TUI. */
 export function toolPreview(toolName: string, input: Record<string, unknown>): string {
+  let raw: string;
   switch (toolName) {
     case "run_terminal_command":
-      return `$ ${String(input.command ?? "")}`;
+      raw = `$ ${String(input.command ?? "")}`;
+      break;
     case "read_files":
-      return `Read ${Array.isArray(input.paths) ? (input.paths as unknown[]).join(", ") : String(input.paths ?? "")}`;
+      raw = `Read ${Array.isArray(input.paths) ? (input.paths as unknown[]).join(", ") : String(input.paths ?? "")}`;
+      break;
     case "write_file":
-      return `Write ${String(input.path ?? "")}`;
+      raw = `Write ${String(input.path ?? "")}`;
+      break;
     case "str_replace":
-      return `Edit ${String(input.path ?? "")}`;
+      raw = `Edit ${String(input.path ?? "")}`;
+      break;
     case "list_directory":
-      return `List ${String(input.path ?? ".")}`;
+      raw = `List ${String(input.path ?? ".")}`;
+      break;
     case "glob":
-      return `Glob ${String(input.pattern ?? "")}`;
+      raw = `Glob ${String(input.pattern ?? "")}`;
+      break;
     case "code_search":
-      return `Search ${String(input.pattern ?? "")}`;
+      raw = `Search ${String(input.pattern ?? "")}`;
+      break;
     case "write_todos":
-      return "Update to-dos";
+      raw = "Update to-dos";
+      break;
     case "task_completed":
-      return "Task completed";
+      raw = "Task completed";
+      break;
     case "ask_user":
-      return "Ask user";
+      raw = "Ask user";
+      break;
     case "skill":
-      return `Skill ${String(input.name ?? "")}`;
+      raw = `Skill ${String(input.name ?? "")}`;
+      break;
     default:
-      return toolName;
+      raw = toolName;
   }
+  return sanitizeTerminalText(raw);
 }
 
 /** Execute one parsed tool call; unknown tools and validation errors are results, not throws. */

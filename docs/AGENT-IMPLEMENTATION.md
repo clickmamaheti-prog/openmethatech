@@ -515,21 +515,752 @@ sendiri benar (picker tetap terbuka, indikator `↑ 11 baris di
 atas` tampil); ekspektasi tes itu lemah, bukan perilaku produk
 yang salah.
 
-## 5. Hasil build + test
+## 4f. Adopsi text rendering Freebuff — semantic colors, typography, Markdown (2026-11-09)
+
+**Latar:** Reza kirim TASK adopsi text rendering Freebuff ke TUI
+MethaTech (0.1.8): warna berdasarkan peran semantik teks (bukan
+satu warna rata), hierarki tipografi (bold/italic/dim), Markdown
+dirender penuh (bukan simbol mentah), output tool/agent ikut
+styling status eksekusi. Audit GLM menemukan 14 gap di 0.1.7
+(lihat bawah). Syarat: jangan ubah logika agen, tool execution,
+provider model, atau komponen TUI lain; backup + git checkpoint
+dulu; jangan commit/push/deploy (0.1.8 hanya jalan bila Reza
+bilang "gaz").
+
+**Bukti dari source Freebuff (dibaca langsung, bukan README):**
+- `cli/src/utils/theme-system.ts` dark theme: primary #9EFC62,
+  secondary #a3aed0, success #22c55e, error #ef4444, warning
+  #FFA500, info #9EFC62, link #3B82F6, foreground #f1f5f9, muted
+  #acb3bf, border #536175, surface #202327, aiLine #6b7280,
+  userLine #9EFC62. Markdown palette: codeBackground #374151,
+  codeHeaderFg #5b647a, inlineCodeFg #FF8534, codeTextFg #f1f5f9,
+  headingFg semua level #facc15, listBulletFg #a3aed0,
+  blockquoteBorderFg #334155, blockquoteTextFg #e2e8f0, dividerFg
+  #283042, codeMonochrome false.
+- `cli/src/utils/markdown-renderer.tsx`: unified + remark-parse +
+  remark-gfm + remark-breaks → mdast; `MarkdownPalette`;
+  `renderMarkdown` / `renderStreamingMarkdown` /
+  `renderStreamingMarkdownIncremental` (cache + safe boundaries);
+  wrapText pakai stringWidth (Unicode-aware); renderTable =
+  tabel box-drawing (border ┌┬┐├┼┤└┴┘, header bold + headingFg,
+  border dividerFg, sel wrap, shrink proporsional);
+  parseInlineFallback; heading = bold + headingFg + '\n\n';
+  inline code = fg inlineCodeFg + bg codeBackground + BOLD +
+  spasi; code block header `// lang` codeHeaderFg, body
+  monochrome; list marker listBulletFg (`- `, `N. `, `[x] `,
+  `[] `); blockquote `> ` borderFg + teks blockquoteTextFg;
+  link fg linkFg; strong BOLD; emphasis ITALIC; delete
+  (strikethrough) DIM; thematic break '─' lebar max(10,
+  min(codeBlockWidth, 80)) dividerFg; paragraf '\n\n' (tight
+  '\n' sebelum blockquote/list).
+- `cli/src/components/blocks/single-block.tsx:102`: teks user
+  ITALIC; teks kosong render null; blok reasoning return null.
+- `cli/src/components/blocks/tool-branch.tsx`:
+  run_terminal_command tampilkan 3 baris stdout TERAKHIR;
+  `$ command` preview; tool call tersembunyi collapse.
+- `cli/src/components/tools/tool-call-item.tsx`: header `• `/`▸ `/
+  `▾ ` + nama tool BOLD foreground; ` running` primary + DIM;
+  collapsed preview muted + ITALIC.
+- `cli/src/components/tools/run-terminal-command.tsx` +
+  `terminal-command-display.tsx`: `$ ` success green, command
+  BOLD foreground, timeout muted + DIM, output muted, `Show N
+  more lines` secondary + UNDERLINE; parseTerminalOutput gabung
+  stdout + stderr, error → `Error:...`.
+- `cli/src/components/thinking.tsx`: PREVIEW_LINE_COUNT = 5;
+  `•` reasoning / `▾` expanded / `▸` collapsed + BOLD
+  "Thinking"; preview = 5 baris terakhir, italic muted,
+  paddingLeft 2; satu `**bold**` di bawah 100 karakter render
+  NOTHING.
+- `cli/src/components/blocks/content-with-markdown.tsx`:
+  streaming pakai incremental cache; tanpa markdown → raw text.
+- `common/src/util/terminal-safe-text.ts`:
+  sanitizeTerminalOutput strip ESC/OSC/CSI/C0/C1/invisible
+  Unicode; newline survive, tab → 2 spasi, bare `\r` hanya
+  simpan teks setelah `\r` terakhir.
+- `message-block.tsx:275` gap 1 antar blok;
+  `message-with-agents.tsx:226` paddingBottom 1 antar pesan
+  (kecuali terakhir).
+
+**Audit MethaTech 0.1.7 (HEAD 3897be2) — 14 gap:**
+1. `*italic*`/`_italic_` tidak diparse inlineSegments (hanya
+   `**bold**`, `` `code` ``, `[link](url)`).
+2. `~~strike~~` tidak diparse (VisualSegment punya flag
+   strikethrough tapi tak pernah diset dari `~~`).
+3. Item list tidak parse inline markdown.
+4. Tidak ada task list `- []`/`- [x]`.
+5. Tidak ada tabel (`| a | b |` tampil mentah).
+6. Blockquote pakai `▎` bukan `> ` Freebuff.
+7. Divider tidak di-cap (Freebuff cap min(width, 80)).
+8. Code fence tak tertutup saat streaming ikut di-markdown-parse
+   (Freebuff tampilkan pending fence mentah sebagai code).
+9. wrapText pakai panjang string JS, bukan Unicode-aware
+   (Freebuff pakai stringWidth, wide char = 2 sel).
+10. TIDAK ADA sanitasi ANSI di mana pun.
+11. Pesan tool string polos — preview accentSecondary non-bold,
+    hasil muted apa pun statusnya (✗ harusnya merah error).
+12. Heading tidak parse inline code di dalamnya.
+13. Pesan user tidak parse inline markdown.
+14. Tidak ada tight-followup (paragraf sebelum list/blockquote
+    '\n' di Freebuff, '\n\n' di MethaTech).
+
+**Keputusan yang dicatat:** heading tetap semua kuning #facc15
+(tema dark Freebuff; ide judul utama cyan/biru di TASK tidak ada
+di source Freebuff, TIDAK diadopsi); preview tool BOLD foreground
+(Freebuff) dengan `$ ` success green untuk shell; `✓` success
+green + teks muted, `✗` error red + teks error; 3 baris terakhir
+digabung " / " dipertahankan (pilihan ringkas MethaTech);
+`~~` → DIM (Freebuff delete → DIM), todos tetap strikethrough;
+blok error ChatApp sudah merah (baris 1463).
+
+**Perubahan MethaTech:**
+- `src/ui/terminal-safe.ts` (BARU): port verbatim
+  sanitizeTerminalText/sanitizeTerminalOutput dari Freebuff
+  (Apache-2.0) — regex DEFAULT_IGNORABLE diverifikasi
+  byte-identik dengan source asli.
+- `src/ui/layout.ts`: `cellWidth`/`textWidth` Unicode-aware
+  (dipakai wrapText/splitSegments/lineLength); `VisualSegment.dim`
+  baru; `inlineSegments` ditulis ulang jadi scanner
+  (`***bold+italic***`, `**bold**`, `__bold__`, `~~strike~~` →
+  DIM, `` `code` ``, `[link](url)`, `*italic*`, `_italic_` —
+  dengan aturan word-boundary CommonMark supaya
+  `some_variable`/`a*b*c` tetap literal); `markdownLines`:
+  heading parse inline (tetap bold kuning), blockquote `> `,
+  list task checkbox + inline parsing, divider cap 80;
+  `tableLines` (BARU, export): tabel box-drawing, header bold
+  kuning, border dividerFg, wrap + shrink proporsional,
+  alignment `:---`/`---:`/`:---:`, padding dari lebar visible
+  (bukan panjang mentah bermarker); `flattenMessages`: deteksi
+  run baris tabel, tight-followup (tanpa blank sebelum
+  list/blockquote/heading/divider/tabel), blank beruntun collapse
+  jadi satu (pendingBlank di level parts — blank sebelum code
+  block dipertahankan), pesan tool terstruktur
+  (`LayoutMessage.tool` {name, preview, shell, results[]} —
+  preview BOLD, `$ ` hijau sukses + command BOLD di-wrap per
+  kata (lanjutan indent 2 spasi, tidak pernah putus tengah
+  kata), `✓` hijau / `✗` merah), pesan user parse inline
+  markdown (tetap italic, label `You: ` bold non-italic);
+  sanitasi di render boundary `flattenMessages` (content +
+  thinking + todos + tool preview/results) — SATU choke point
+  tempat semua teks eksternal dibersihkan sebelum mencapai
+  terminal.
+- `src/ui/syntax.ts`: `splitMessageParts` — fence tak tertutup
+  jadi part `code` (pending fence tampil sebagai code dengan
+  header `// lang`, isinya tidak di-markdown-parse saat
+  streaming).
+- `src/agent/tools.ts`: `toolPreview` disanitasi di sumber
+  (display-only, tidak masuk history model).
+- `src/ui/ChatApp.tsx`: `pushTool(preview, toolName)` +
+  `appendToLastTool(summary, ok)` terstruktur (content tetap
+  simpan render teks polos untuk konsumen lain); `pushSystem`,
+  `setError` (2 site), ringkasan `/compact` disanitasi;
+  `dimColor={seg.dim}` di kedua render site segmen (welcome +
+  pesan); streamed text/reasoning SENGAJA disimpan mentah —
+  sanitasi per-delta akan merusak escape sequence yang terbelah
+  antar chunk (parameter byte chunk kedua bocor jadi teks
+  "31m"); sanitasi terjadi di `flattenMessages` atas konten
+  penuh yang sudah tersusun ulang.
+- Tes: `test/terminal-safe.test.mjs` (BARU, 9 tes),
+  `test/layout.test.mjs` (+27 tes: lebar Unicode, emphasis,
+  strikethrough, task list, tabel, tight-followup, tool
+  terstruktur, user inline, ANSI strip, unclosed fence,
+  blank teks→code), `test/mock-server.mjs` respons
+  `MOCK_MARKDOWN=1` (showcase semua fitur Markdown),
+  `test/tui-pty.sh` s25 (13 check: marker mentah TIDAK ada,
+  bentuk render ADA) + perbaikan bug helper `check`/
+  `check_absent` (needle diawali `-` harus pakai `grep -qF --`,
+  sebelumnya "lolos" palsu karena grep error).
+- TIDAK ada dependency tambahan. TIDAK ada commit/push/deploy
+  (checkpoint branch `checkpoint-text-rendering-0.1.7` di
+  3897be2; kerja ini untuk 0.1.8, publish hanya bila Reza
+  bilang "gaz").
+
+**Hasil tes (setelah perbaikan):** `npx tsc` bersih;
+`npm test` 154/154 (118 lama + 36 baru); `bash test/tui-pty.sh`
+141/141 (128 lama + 13 s25 baru); `bash test/agent-pty.sh`
+27/27. Screenshot (capture tmux asli,
+`test/render-ansi-png.py`): `docs/images/text-rendering-s25-small.png`
+(80x24), `docs/images/text-rendering-s25-desktop.png` (120x36) —
+heading kuning bold, italic miring, strikethrough redup,
+blockquote `> `, tabel header kuning, inline code oranye di bg
+abu, link biru, divider ter-cap 80 di desktop — diverifikasi
+visual oleh GLM dari ANSI capture (kode warna 220/215/75/59
+cocok dengan palet Freebuff).
+
+**Catatan jujur:** perbaikan `check`/`check_absent` (`grep -qF
+--`) ditemukan karena s25 check `- [x]` mencetak `grep:
+invalid option` tapi tetap PASS — grep yang error dianggap
+"tidak ketemu". Check itu sudah diverifikasi manual ke file
+capture (`grep -F -- "- [x]"` exit 1 = memang tidak ada) dan
+suite penuh diulang sesudah perbaikan helper. Preview tool
+panjang awalnya hard-split tengah kata (`lin/e4`) — diperbaiki
+jadi word-wrap sebelum suite final.
+
+## 4g. Adopsi horizontal gutter Freebuff — SIDE_GUTTER (2026-11-09)
+
+**Latar:** Reza kirim screenshot (tampilan TUI di galeri HP-nya,
+dengan panah hijau ke kiri dan kanan terminal) + TASK: konten TUI
+terlalu dekat dengan batas terminal, tidak ada jarak kiri-kanan
+(gutter). Perintah: referensi WAJIB source asli Freebuff, audit
+dulu, implementasi spacing Freebuff, FOKUS HANYA horizontal
+spacing/layout (jangan ubah warna, typography, tema, ikon, sistem
+rendering, agent runtime, tool calling, shell, logika percakapan,
+arsitektur TUI), backup file, tes di 40/80/120 kolom dengan
+screenshot yang dicek visual sendiri. Untuk 0.1.8 bersama text
+rendering; TIDAK commit/push/publish/deploy sebelum Reza bilang
+gaz.
+
+**Referensi Freebuff (commit 5d8bd24, dibaca langsung dari source,
+bukan README/screenshot/asumsi):**
+
+| File:baris | Yang ditemukan |
+|---|---|
+| `cli/src/hooks/use-terminal-dimensions.ts` | `separatorWidth = Math.max(1, Math.floor(terminalWidth) - 2)`; `contentMaxWidth = Math.max(10, Math.min(terminalWidth - 4, 80))` |
+| `cli/src/chat.tsx` (scrollbox contentOptions) | `paddingLeft: 1, paddingRight: 2` (kanan 2 = 1 gutter + 1 track scrollbar); ad row wrapper `marginLeft: 1, marginRight: 1` |
+| `cli/src/components/message-with-agents.tsx:105,148-149` | `SIDE_GUTTER = 1`; contentBoxStyle `paddingLeft: SIDE_GUTTER, paddingRight: SIDE_GUTTER`, width 100% |
+| `cli/src/components/chat-header.tsx:46-47` dan `freebuff-chat-header.tsx:110-111` | `paddingLeft: 1, paddingRight: 1` (di dalam scrollbox) |
+| `cli/src/components/status-bar.tsx:41,279-280` | `paddingLeft: 1, paddingRight: 1` (root level, di luar scrollbox) |
+| `cli/src/components/chat-input-bar.tsx:485-499` | ClickableTitleBox `width: '100%'` + `paddingLeft: 1, paddingRight: 1` (border selebar terminal, gutter DI DALAM border); baris dalam juga padding 1/1 |
+| `cli/src/components/separator.tsx:30` | `separatorWidth = Math.max(1, width - widthOffset)`; pemanggil passing `terminalWidth - 2` |
+| `cli/src/hooks/use-chat-ui.ts:61` | `messageAvailableWidth = separatorWidth` |
+
+Geometri Freebuff yang dihasilkan (lebar terminal W): teks pesan di
+kol 2 (scroll 1 + message 1), lebar W-5; teks header kol 2 (scroll
+1 + header 1); teks status bar kol 1 (root 1); teks input kol 2
+(border kol 0 + padding 1); separator kol 1..W-2. Root box chat.tsx
+TIDAK punya padding — semua gutter berasal dari layer dalam.
+
+**Audit MethaTech sebelum perubahan (diukur live di tmux, 80 kol,
+MOCK_MARKDOWN=1):** root `<Box paddingX={1}>` sudah memberi gutter
+1 kol (layer scroll container); `contentWidth = columns - 4`;
+teks pesan mulai kol 1 (bar user di kol 1, teks user kol 3);
+heading/tabel/divider mulai kol 1; divider 76 lebar (kol 1..76);
+border input kol 1..78, teks input kol 3; footer kol 1. Penyebab
+keluhan: teks pesan hanya 1 kol dari tepi — di layar HP 1 kol
+hampir tidak terlihat, jadi konten terasa menempel di tepi.
+Freebuff menaruh teks pesan di kol 2 (1 scroll + 1 message).
+
+**Implementasi (layered, mengikuti Freebuff, bukan angka statis):**
+
+- `src/ui/layout.ts`: konstanta baru `SIDE_GUTTER = 1`
+  (Freebuff message-with-agents.tsx:105) + komentar layering.
+  `flattenMessages` kini prepend 1 spasi gutter ke SETIAP baris
+  hasil flatten (termasuk blank separator, Thinking, todos, tool,
+  system) — `width` yang diterima adalah lebar TEKS (sudah minus
+  gutter), jadi divider/tabel mempertahankan tepi kanan yang sama.
+  `markdownLines`/`tableLines` TIDAK diubah (fungsi konten murni;
+  gutter hanya di level perakitan pesan).
+- `src/ui/ChatApp.tsx`: `messageWidth = contentWidth - SIDE_GUTTER`
+  dipakai di dua pemanggilan `flattenMessages` (tanpa scrollbar dan
+  `messageWidth - 1` saat scrollbar tampil); header Box dapat
+  `paddingLeft={1}` (Freebuff chat-header, teks header → kol 2).
+- Hasil di 80 kol: teks pesan kol 2..76 (lebar 75 = W-5, PERSIS
+  Freebuff), gutter kiri 2 kol, kanan 3 kol; teks user kol 4
+  (gutter + bar + spasi, sama seperti Freebuff); divider 75 lebar
+  (kol 2..76); tabel di dalam area konten; scrollbar tetap di
+  kol 78 (track di dalam root padding).
+- Perbedaan yang disengaja (dicatat, bukan kelalaian):
+  - Footer/status row TETAP kol 1 (Freebuff status-bar root-level
+    padding 1 — sama).
+  - Input box TETAP border kol 1, teks kol 3. Freebuff menaruh
+    border input di kol 0 (menempel tepi) — MethaTech sengaja
+    mempertahankan border inset 1 supaya border tidak menyentuh
+    tepi, sesuai tujuan TASK. Teks input 1 kol lebih kanan dari
+    teks pesan adalah konsekuensi border box, bukan inkonsistensi.
+  - Picker TIDAK diubah: baris terpilih memakai highlight
+    background full-row; menambah gutter akan memotong highlight.
+    Picker adalah overlay sementara, bukan konten pesan.
+  - Welcome screen TIDAK diubah: kontennya centered, sudah inset
+    jauh dari tepi dengan sendirinya.
+- Adaptif: tidak ada angka padding statis yang baru — gutter
+  adalah konstanta 1 kol per layer (seperti Freebuff), lebar wrap
+  dihitung dari `columns`; `contentWidth` floor 20 → `messageWidth`
+  tidak pernah di bawah 19, jadi terminal sempit tidak rusak.
+- Backup sebelum modifikasi: `.bak-20261109-gutter/`
+  (layout.ts, ChatApp.tsx, layout.test.mjs, tui-pty.sh).
+
+**Test:**
 
 - `npx tsc` (strict): BERSIH.
-- `npm test`: **118/118 lolos** (115 sebelum agent-as-default + 3
-  baru: palette 12 perintah tanpa `/agent`, blank setelah Thinking,
-  tanpa blank ganda bila jawaban kosong).
-- `bash test/tui-pty.sh`: **128/128 lolos** (127 sebelum
-  agent-as-default; s1 kini memeriksa footer `Agent: Default`, s2
-  memeriksa palette TIDAK berisi `/agent`; 6 kegagalan awal putaran
-  ini — s16/s24 interrupt tanpa `dibatalkan`, s19 footer `Chat:
-  New chat` terpotong, s20 Thinking tidak tampil di mode agen, s23
-  footer terpotong — semuanya diperbaiki dan hijau).
-- `bash test/agent-pty.sh`: **27/27 lolos** (28 sebelum
-  agent-as-default; A1/A2 kini tanpa kirim `/agent` — A1 membuktikan
-  agen jalan BY DEFAULT dari welcome screen).
+- `npm test`: **157/157 lolos** (154 sebelum gutter + 3 baru:
+  SIDE_GUTTER = 1; setiap baris flattenMessages diawali gutter
+  tepat 1 spasi, plain, tanpa warna; gutter tidak mendorong baris
+  melewati width + 1 di terminal sempit). 13 assertion string
+  eksak lama diperbarui mengikuti gutter (bukan perilaku yang
+  berubah — hanya prefix spasi).
+- `bash test/tui-pty.sh`: **159/159 lolos** (141 sebelum gutter +
+  18 s26 baru) — skenario gutter di 80/40/120 kol dengan
+  MOCK_MARKDOWN=1, mengukur leading space tiap elemen dari capture
+  tmux asli. s26/80: header 2, heading 2, tabel 2, user 4,
+  footer 1, border input 1, placeholder ` │ ▋Enter…` (box tidak
+  berubah), divider 75. s26/40: header/heading/tabel/user sama
+  (heading + user dicek di capture atas setelah PgUp, tabel di
+  capture tengah — viewport ~6 baris tidak muat semuanya sekaligus),
+  divider 34 — BUKAN 35: saat scrollbar tampil semua baris di-rewrap
+  1 kolom lebih sempit (mekanisme lama: baris user = gutter + bar +
+  spasi + teks, jadi lebar teks harus mengecil supaya track muat)
+  dan divider mengikuti lebar wrap. s26/120: sama, divider cap 80
+  (konten tidak membentang tepi ke tepi). Semua check s1–s25 lama
+  tetap lolos — warna, typography, agen, tools tidak berubah.
+- `bash test/agent-pty.sh`: **27/27 lolos** (tidak berubah).
+
+**TEMUAN SELAMA TES (bukan regresi gutter, dilaporkan untuk
+tindak lanjut terpisah):** di 40 kol, baris `Hasil pemeriksaan dan
+~~yang lama~~ sudah diperbarui.` tampil dengan marker `~~` mentah
+(`Hasil pemeriksaan dan ~~yang` / `lama~~ sudah diperbarui.`).
+Penyebab: `markdownLines` membungkus teks MENTAH dulu (`wrapText`,
+marker dihitung sebagai lebar terlihat) baru parse inline per
+baris (`inlineSegments`) — kalau wrap jatuh di dalam span
+`~~…~~` / `**…**` / `` `…` ``, parser per baris melihat marker
+tidak tertutup dan membiarkannya literal. Terbukti bocor di lebar
+34, 35, DAN 36 — jadi ini cacat bawaan renderer text 0.1.8 yang
+sudah ada sebelum gutter (lebar lama pun membelah span ini),
+bukan efek perubahan ini; tes s25 di 80/120 kol tidak pernah
+menangkapnya karena wrap tidak jatuh di dalam span. Perbaikannya
+(parse-dulu-baru-wrap, atau wrap yang sadar marker) adalah
+perubahan sistem rendering — DI LUAR scope task gutter ini, butuh
+keputusan/task terpisah. Tidak disembunyikan: capture
+`s26-gutter-40-top.plain.txt` menunjukkan kebocorannya.
+
+**Screenshot (dicek visual sendiri):**
+`docs/images/gutter-s26-80.png`, `gutter-s26-40.png`,
+`gutter-s26-120.png` (render `test/render-ansi-png.py` dari
+capture tmux s26; teks pesan jelas inset 2 kol dari tepi kiri,
+divider/tabel tidak menyentuh tepi, input tetap rapi, warna dan
+typography sama seperti s25).
+
+## 4h. Adopsi Markdown renderer Freebuff — parse-dulu-baru-wrap (2026-11-09)
+
+**Latar:** Reza kirim screenshot Termux 0.1.7 (sesi "cek project
+kita" 17:38 UTC): karakter Markdown mentah (`**`, `*`, `` ` ``,
+`###`) masih terlihat di output percakapan. TASK: perbaiki
+rendering teks area percakapan dengan mengadopsi implementasi
+Markdown asli Freebuff — BUKAN regex/string hiding. Scope:
+audit Freebuff, audit MethaTech, implementasi rendering yang
+benar (bold, italic, strikethrough, inline code, fenced code,
+heading, bullet + numbered list, blockquote, tabel, link),
+streaming, konsistensi visual (semantic colors MethaTech),
+validasi semua sintaks + streaming + terminal sempit/lebar.
+Batasan: JANGAN ubah agent runtime, tool calling, shell, sistem
+model, atau gutter (§4g). Untuk 0.1.8 bersama text rendering +
+gutter; TIDAK commit/push/publish/deploy sebelum Reza bilang
+gaz.
+
+**Referensi Freebuff (commit 5d8bd24, dibaca langsung dari source,
+bukan README/screenshot/asumsi):**
+
+| File:baris | Yang ditemukan |
+|---|---|
+| `cli/package.json:47-48,53` | Parser: `unified ^11.0.0` + `remark-parse ^11.0.0` + `remark-gfm ^4.0.1` + `remark-breaks ^4.0.0` |
+| `cli/src/utils/markdown-renderer.tsx:109-112` | Processor tunggal: `unified().use(remarkParse).use(remarkGfm).use(remarkBreaks)`; parse SELURUH teks jadi AST mdast dulu, baru render blok dari AST |
+| `cli/src/utils/markdown-renderer.tsx:1019` | `renderMarkdown(markdown, options)` — parse + render penuh; palette (inlineCodeFg, codeBackground, headingFg per depth, listBulletFg, blockquoteBorderFg/TextFg, dividerFg, linkFg) |
+| `cli/src/utils/markdown-renderer.tsx:1110` | `renderStreamingMarkdown` — tanpa Markdown → teks polos; ada fence backtick terbuka → render bagian lengkap + sisakan fence pending mentah |
+| `cli/src/utils/markdown-renderer.tsx:1238` | `renderStreamingMarkdownIncremental` + `StreamingMarkdownCache` — commit teks sebelum `lastSafeBoundary` (di luar fence, sesudah baris kosong, sebelum blok baru), parse ulang hanya ekornya; Markdown non-lokal (definisi link, blok HTML) memaksa render ulang penuh |
+| `cli/src/utils/markdown-renderer.tsx:237,314,361` | `parseInlineFallback` / `applyInlineFallbackFormatting` — remark melewatkan pola emphasis tertentu (mis. `Other**.github/**`); node teks sisa di-split ulang pada marker `*`/`**`. `nodeToPlainText` untuk lebar kolom tabel |
+| `cli/src/utils/markdown-renderer.tsx:168,655,710` | `splitNodesByNewline`, `wrapText` (word wrap sadar Unicode via `string-width`), `renderTable` (border box-drawing, lebar kolom dari lebar teks polos sel, shrink proporsional, sel di-wrap) |
+| `cli/src/utils/markdown-renderer.tsx:467,515,551` | `renderNodes` / `renderBlockquote` / `renderList` — strong → BOLD, emphasis → ITALIC, delete → DIM, inlineCode → bold + spasi + fg/bg, heading → bold + warna per depth, link → label saja (URL tidak ditampilkan), code block → monochrome + header `// lang`, thematicBreak → divider cap 80 |
+| `cli/src/components/blocks/content-with-markdown.tsx:27-40` | `ContentWithMarkdown`: `hasMarkdown` → teks polos; streaming → render inkremental dengan cache; selesai → `renderMarkdown` |
+
+**Audit MethaTech sebelum perubahan (akar masalah):** pipeline
+lama membungkus teks MENTAH dulu (`wrapText` di layout.ts,
+marker dihitung sebagai lebar terlihat) lalu parse inline per
+baris dengan scanner regex (`inlineSegments`), dan menangani
+blok per baris mentah dengan regex (`markdownLines`,
+`tableLines` membungkus teks sel mentah lalu parse inline per
+baris). Setiap wrap yang jatuh di dalam span membocorkan marker
+mentah — terbukti di lebar 34, 35, 36 (§4g). Penanganan blok
+berbasis regex per baris membuat konstruksi multi-baris tidak
+pernah diparse sebagai dokumen. Itulah yang terlihat di
+screenshot Reza: marker mentah di output.
+
+**Probe parser (diverifikasi dengan menjalankan kode):** remark
+mem-parse semua konstruk dengan benar (inlineCode, list termasuk
+checkbox, ordered dengan start, tabel dengan align, blockquote
+dengan strong di dalam, heading, link, autolink → node link,
+hard break → node `break`, nested list, linkReference +
+definition, escape `\*` → literal `*`). Perilaku CommonMark
+yang penting: `Other**.github/**` tetap SATU node teks literal
+(makanya Freebuff punya fallback); `**bold` / `~~strike` yang
+belum tertutup tetap teks literal (keadaan sementara saat
+streaming, selesai saat marker penutup tiba); `a*b*c` →
+emphasis pada "b" (CommonMark mengizinkan `*` intraword —
+paritas Freebuff; regex lama MethaTech sengaja membiarkannya
+literal — perubahan perilaku yang didokumentasikan);
+`some_variable` tetap literal (`_` intraword tidak bisa membuka
+emphasis); `2*3` tetap literal. **Catatan:** `remark-breaks`
+adalah transform yang hanya jalan di `.process()`/`.run()`,
+BUKAN `.parse()` — jadi di Freebuff MAUPUN MethaTech (keduanya
+pakai `.parse()`) plugin itu inert; soft break di dalam nilai
+teks ditangani pemisahan `\n` di wrap (cerminan
+`splitNodesByNewline` Freebuff). Tabel tepat sesudah baris
+blockquote tanpa baris kosong ditelan blockquote via lazy
+continuation CommonMark (Freebuff akan melakukan hal yang sama
+— konten mock diperbaiki dengan baris kosong, seperti respons
+model asli).
+
+**Implementasi (parse-dulu-baru-wrap, mengikuti Freebuff):**
+
+- Dependensi baru (major sama seperti Freebuff):
+  `unified@^11`, `remark-parse@^11`, `remark-gfm@^4`,
+  `remark-breaks@^4` + dev `@types/mdast@^4` (71 paket).
+- File baru `src/ui/cells.ts` (166 baris): `cellWidth` +
+  `textWidth` dipindah verbatim dari layout.ts supaya
+  markdown.ts bisa mengukur teks tanpa import sirkular;
+  layout.ts me-re-export keduanya (test lama tetap jalan).
+- File baru `src/ui/markdown.ts` (~900 baris): renderer
+  parse-first. `parseMarkdown` (processor tunggal),
+  `applyInlineFallbackFormatting` + `parseInlineFallback`
+  (port Freebuff), `nodeToPlainText` (port Freebuff),
+  `inlineSegmentsFromNodes` (strong→bold, emphasis→italic,
+  delete→dim, inlineCode→oranye bold di bg abu + spasi,
+  link→label biru, linkReference→label polos, image→kosong
+  paritas Freebuff, break→spasi, html→teks mentah),
+  `inlineGroupsFromNodes` (pisah di node `break`),
+  `renderInlineText` (parser fragmen untuk sel tabel/baris
+  user; fragmen berbentuk blok fallback ke teks polos),
+  `wrapSegments` (wrap segmen ber-style di lebar: greedy word
+  wrap, hard-split kata terlalu panjang per sel, whitespace
+  menciut jadi satu spasi, prefix keluar dari budget baris,
+  gabung atom se-gaya supaya satu run tetap satu segmen,
+  potong spasi akhir saat flush kecuali pad inline-code yang
+  ber-backgroundColor, pad inline-code dipertahankan di awal/
+  akhir baris), `renderBlocks` (paragraf dengan aturan
+  tight-followup, heading bold+kuning, list dengan marker/
+  checkbox/task/nested indent/ordered start, blockquote prefix
+  `> ` + lewati baris kosong, code monochrome, tabel via
+  `renderTable`, thematicBreak divider cap 80, html sebagai
+  baris polos, definition tidak terlihat), `renderList`,
+  `renderTable` (box-drawing, sel diparse DULU jadi segmen
+  lalu di-wrap per lebar kolom, alignment dari
+  mdast `table.align`, shrink proporsional — algoritma sama
+  seperti `tableLines` lama), `renderMarkdownText` →
+  `{lines, startsTight, startsBlank, endsBlank}` (baris kosong
+  akhir dipotong; blank sesudah paragraf kecuali blok berikut
+  tight: blockquote/list/heading/divider/table — aturan
+  MethaTech lama yang dipertahankan).
+- Streaming: jaminan sama seperti Freebuff — emphasis yang
+  belum tertutup tampil literal untuk satu flush lalu selesai
+  saat marker penutup tiba; fence yang belum tertutup tetap
+  bagian code via `splitMessageParts` (syntax.ts, tidak
+  diubah).
+- `src/ui/layout.ts` (operasi bedah, tsc bersih): import
+  markdown.ts + cells.ts; HAPUS `inlineSegments`,
+  `markdownLines`, `isTableRow`/`splitTableRow`/
+  `isSeparatorRow`/`cellAlign`/implementasi lama `tableLines`,
+  `lineKind`, `isTightFollowup` (aturan tight pindah ke
+  markdown.ts sebagai `isTightFollowupType`).
+  `tableLines(rows, width)` dipertahankan sebagai adapter
+  tipis: parse baris mentah dengan remark, delegasi ke
+  `renderTable` markdown.ts (output sama, tanpa duplikasi
+  box-drawing). Cabang user `flattenMessages`: tiap baris
+  mentah diparse via `renderInlineText` + italic, di-wrap via
+  `wrapSegments` (label "You: " 5 kol keluar dari budget
+  baris pertama); konten user tetap inline-only (tanpa render
+  blok — sama seperti perilaku lama dan
+  `UserBlockTextWithInlineCopy` Freebuff). Cabang assistant:
+  text part lewat `renderMarkdownText`; logika pendingBlank
+  batas part dipertahankan (`startsBlank`/`endsBlank`/
+  `startsTight` + flag `emitted` kini di level loop part dan
+  diset juga oleh code part). Cabang tool/todos/system/
+  thinking TIDAK berubah. `wrapText`, `splitSegments`,
+  `splitMessageParts` TIDAK berubah.
+- Perubahan perilaku vs renderer lama (didokumentasikan di
+  kode + test): `a*b*c` kini meng-italic-kan "b" (paritas
+  CommonMark/Freebuff); image tampil sebagai kosong (paritas
+  Freebuff); tabel tanpa baris delimiter tampil sebagai
+  paragraf literal (CommonMark — kode lama berbasis baris
+  menampilkannya sebagai tabel ber-border); `text\n---`
+  adalah setext H2 (CommonMark — kode lama menampilkan
+  divider).
+- Spacing antar-blok kini mengikuti Freebuff secara struktural
+  (tiap blok mendorong `'\n\n'`/`'\n'` sesudahnya: blank
+  sesudah list/blockquote/tabel/divider — renderer lama lebih
+  padat karena aturan tight-followup meniadakan blank itu).
+  Konsekuensi terukur: pesan showcase s25/s26 kini 22 baris
+  (dulu 18) di area 18 baris pada 80×24 — scrollbar tampil,
+  divider 74 (bukan 75), heading/user dicek via capture atas
+  setelah PgUp. Ini perilaku Freebuff yang benar, bukan
+  regresi; ekspektasi test diperbarui mengikuti perilaku
+  baru, bukan sebaliknya.
+- Backup sebelum modifikasi: `.bak-20261109-markdown/`
+  (layout.ts, syntax.ts, layout.test.mjs, tui-pty.sh,
+  mock-server.mjs, package.json) + skrip probe
+  (probe-remark.mjs, probe-tree.mjs, probe2–5.mjs).
+
+**Test:**
+
+- `npx tsc` (strict): BERSIH.
+- `npm test`: **167/167 lolos** (157 sebelum Markdown +
+  10 baru: Freebuff inline fallback `Other**.github/**`,
+  unclosed vs closed `**`, escapes + autolink, nested list,
+  ordered list start, **tes regresi §4g (tidak ada `~~`
+  mentah di lebar 34/35/36/40/80, tidak ada `**` mentah saat
+  wrap, tidak ada backtick mentah saat wrap)**, wrapSegments
+  hard-split + prefix). 5 kegagalan awal diperbaiki:
+  granularitas segmen (gabung atom se-gaya di wrapSegments),
+  spasi pad inline-code (pertahankan pad ber-backgroundColor
+  di awal/akhir baris), ekspektasi intraword dikoreksi ke
+  CommonMark.
+- `bash test/tui-pty.sh`: **171/171 lolos** (159 sebelum
+  Markdown + 12 s27 baru). s25: semua check tabel/divider/
+  marker mentah kini lolos; heading dicek di capture atas
+  (1× PgUp). s26/80: divider 74 (scrollbar tampil — pesan
+  22 baris di area 18 baris), heading/user kol 2/4 dicek di
+  capture atas; tabel tetap kol 2. s26/40: tabel via 2× PgUp,
+  heading/user via 4× PgUp (pesan 24 baris di 40 kol), divider
+  34. s26/120: sama seperti dulu, divider cap 80. **s27
+  (baru, MOCK_MARKDOWN_FULL)**: showcase sintaks lengkap
+  (H1/H2, bold, italic, strikethrough, bold+italic, inline
+  code, task list, plain list, numbered list, blockquote
+  multi-baris, tabel 3 kolom, divider, fenced code `js`,
+  link) dikirim per 17 karakter — emphasis dan fence tiba
+  TERBELAH antar chunk stream — dan TIDAK ADA marker mentah
+  di 80 maupun 40 kol (bukti streaming + regresi §4g di level
+  TUI). Semua check s1–s24 lama tetap lolos — warna,
+  typography, agen, tools, gutter tidak berubah.
+- `bash test/agent-pty.sh`: **27/27 lolos** (tidak berubah).
+- Mock: `MOCK_MARKDOWN` diperbaiki (baris kosong sebelum
+  tabel — lazy continuation CommonMark menelan tabel ke dalam
+  blockquote tanpa itu; Freebuff mem-parse sama); mock baru
+  `MOCK_MARKDOWN_FULL` (semua sintaks, chunk 17 karakter).
+- **Bug renderer screenshot ditemukan saat cek visual:**
+  `test/render-ansi-png.py` `parse_line` memajukan indeks
+  hanya `i += 2` sesudah `38;5;N`/`48;5;N` — indeks warna
+  `N` lalu diproses ulang sebagai kode SGR; `N=102`
+  (codeHeaderFg `#5b647a`) jatuh di rentang 100–107 sehingga
+  background baris header code `// js` digambar hijau terang
+  palsu. Output TUI (capture ANSI) BENAR — hanya PNG-nya
+  yang salah. Diperbaiki: `i += 3` untuk `;5;` dan `i += 5`
+  untuk `;2;` (cabang RGB juga laten salah dengan cara yang
+  sama). Screenshot di-render ulang sesudah perbaikan;
+  screenshot lama (s25/gutter) tidak terpengaruh karena
+  warnanya tidak jatuh di rentang itu.
+
+**Screenshot (dicek visual sendiri):**
+`docs/images/markdown-s27-80-top.png` (H1 kuning, bold/
+italic/strike/bold+italic, inline code oranye, H2, task list,
+numbered list, blockquote — tanpa marker mentah),
+`markdown-s27-80-bottom.png` (tabel 3 kolom header kuning,
+divider, code block `// js` abu + body di bg abu, link biru),
+`markdown-s27-40-top.png` (40 kol: span `~~` yang membelah
+wrap TIDAK bocor — regresi §4g tertutup di level TUI),
+`markdown-s26-80.png`, `markdown-s26-120.png` (spacing blok
+Freebuff, gutter tetap kol 2, divider cap 80 di lebar).
+
+## 4i. Mouse wheel scrolling — swipe Termux / wheel desktop (2026-11-09)
+
+**Keluhan Reza (screenshot Termux, panah hijau ke scrollbar):**
+riwayat percakapan hanya bisa digulir dengan Arrow Up/Down dan
+PgUp/PgDn. Maunya: swipe layar HP ke atas/bawah seperti aplikasi
+Android — swipe ke atas lihat percakapan lama, swipe ke bawah
+kembali ke terbaru; natural dan responsif; scrollbar kanan
+mengikuti viewport; posisi scroll tidak lompat saat AI streaming;
+baca riwayat lama tidak ditarik paksa ke bawah; di paling bawah,
+respons baru tetap auto-follow; input prompt dan status bar tetap.
+
+**Jawaban atas pertanyaan kuncinya dulu: YA, Ink bisa menerima
+event mouse wheel.** Ink 6.8.0 TIDAK punya API mouse (grep
+`mouse|1002|1006|wheel` di `node_modules/ink/build/` kosong —
+perbedaan terpaksa yang sudah dicatat sejak 0.1.6), TAPI eventnya
+sampai ke `useInput` secara utuh: input-parser Ink memotong
+sequence CSI di final byte-nya, dan keypress parser-nya
+melewatkan sequence yang tidak dikenal apa adanya (bukan arrow
+key), jadi handler menerima e.g. `"[<64;10;5M"` (satu ESC depan
+sudah dikupas Ink). **Dibuktikan empiris, bukan dari teori:**
+probe Ink minimal di tmux (`/tmp/ink-mouse-probe/probe.mjs`,
+`tmux send-keys -H` injeksi byte SGR) — wheel up
+`\x1b[<64;10;5M`, wheel down `\x1b[<65;10;5M`, tap click
+press `\x1b[<0;10;5M` + release `\x1b[<0;10;5m`, dan tombol
+biasa `a` semua sampai utuh sebagai satu event `useInput`.
+Satu temuan probe: sequence yang terbelah di dua read stdin
+dengan jeda (Ink flush partial CSI sesudah satu event-loop
+turn) tiba sebagai `"[<64;1"` lalu `"0;5M"` — parser menelan
+kedua potongan itu (flag `fragmentPending`) supaya tidak
+pernah terketik ke draft. X10 (`ESC [ M` + 3 byte) TIDAK
+didukung: parser Ink mengakhiri CSI di byte `M` dan 3 byte
+payload tiba sebagai teks biasa — tidak bisa dikenali andal.
+Semua terminal modern mengirim SGR begitu 1006h aktif, jadi
+ini hanya memengaruhi terminal pra-SGR.
+
+**Mekanisme Freebuff yang diadopsi (source asli, bukan README):**
+- `cli/src/chat.tsx:2241` — `<scrollbox stickyScroll
+  stickyStart="bottom" scrollX={false}>`; scrollbar vertikal
+  hanya tampil saat `!streaming && !waiting && overflow`.
+- `cli/src/hooks/use-scroll-management.ts` (206 baris) —
+  `scrollTop/scrollHeight/viewport.height`;
+  `animateScrollTo` easeOutCubic 200ms/16ms; PgUp/PgDn =
+  0.8 viewport; auto-scroll 50ms sesudah messages berubah
+  HANYA bila `autoScrollEnabled` (dimatikan selama animasi
+  programmatic, dikembalikan ke `isNearBottom` di akhir);
+  scroll user mengeset `autoScrollEnabled = isNearBottom`
+  lewat event `change` verticalScrollBar;
+  `SCROLL_NEAR_BOTTOM_THRESHOLD = 1`.
+- OpenTUI 0.3.4 (tag v0.3.4, sumber dibaca langsung):
+  `renderer.ts:170,1144` `enableMouse` default true;
+  `zig/terminal.zig` `setMouseMode` — enable menulis
+  `1003l` dulu lalu `1000h + 1002h + 1006h` (movement=false),
+  disable menulis `1003l, 1002l, 1000l, 1006l`;
+  `lib/parse.mouse.ts` `decodeSgrEvent` — scroll =
+  `button & 64`, arah = `button & 3` (0 up, 1 down), wheel
+  up = SGR 64, wheel down = 65, hanya saat press `M`;
+  `renderables/ScrollBox.ts:530` `onMouseEvent` — wheel
+  memakai `scrollAccel.tick(now)`, default
+  `LinearScrollAccel` = 1 baris per tick, diterapkan
+  LANGSUNG ke `scrollTop` (tanpa animasi); `stickyScroll`
+  menahan bawah saat konten baru masuk kecuali user sudah
+  scroll.
+- `cli/src/utils/keyboard-actions.ts` — PgUp/PgDn prioritas
+  14 → scroll-up/scroll-down (tetap jalan, tidak diubah).
+
+**Mekanisme swipe Termux (source asli termux-app monorepo,
+bukan asumsi):** `TerminalView.java` — drag jari →
+`GestureDetector.onScroll` → `doScroll(e, deltaRows)`,
+`deltaRows = distanceY / fontLineSpacing` dengan
+`mScrollRemainder` (pecahan baris diakumulasi, halus).
+`doScroll`: bila mouse tracking aktif (`isMouseTrackingActive`
+= DECSET 1000 ATAU 1002) → kirim SATU event
+`MOUSE_WHEELUP_BUTTON` (64) / `MOUSE_WHEELDOWN_BUTTON` (65)
+per baris yang didrag; bila TIDAK aktif dan alternate screen
+aktif → kirim DPAD_UP/DOWN (inilah perilaku HARI INI: swipe
+di TUI mengirim arrow key → ganti model / recall history,
+bukan scroll — akar keluhan Reza); bila tidak aktif dan
+bukan alternate screen → Termux menggerakkan transcript-nya
+sendiri. Fling: mouse tracking on di awal fling → Scroller
+terus memanggil `doScroll` dengan inersia (batas ±mRows/2).
+Tap + mouse tracking on → press+release tombol kiri (klik;
+aplikasi harus menelannya). `TerminalEmulator.java:553`
+`sendMouseEvent` — mode SGR (1006 set) →
+`\x1b[<Cb;Cx;CyM` / `m`, koordinat 1-based; semua event wheel
+satu gesture melaporkan posisi touch-DOWN. Arah: jari ke
+BAWAH → WHEELUP (64) = pesan lama; jari ke ATAS → WHEELDOWN
+(65) = pesan baru — sama dengan konvensi desktop. Seleksi
+teks tetap jalan: long-press masuk selection mode, dan saat
+selecting, touch bypass mouse reporting (`isSelectingText`).
+
+**Yang diubah di MethaTech (semua di 0.1.8, belum commit):**
+- BARU `src/ui/mouse.ts` — `MOUSE_ENABLE`
+  (`\x1b[?1003l\x1b[?1000h\x1b[?1002h\x1b[?1006h`) dan
+  `MOUSE_DISABLE` (`\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l`,
+  urutan persis OpenTUI; 1003h any-event TIDAK PERNAH
+  diaktifkan supaya motion mouse tidak membanjiri input);
+  `WHEEL_LINES = 1` (paritas LinearScrollAccel; 1 baris
+  Termux per event = 1:1 dengan jari); `parseMouseInput`
+  (murni, unit-tested): ekstrak wheel up/down dari SGR
+  lengkap (dengan/tanpa ESC depan), telan klik/drag/motion/
+  release/wheel horizontal, kembalikan sisa teks untuk jalur
+  keyboard, telan sequence terbelah (`fragmentPending`).
+- `src/ui/layout.ts` — BARU `wheelScrollOffset`
+  (1 baris per event, clamp dua ujung) di samping
+  `pageScrollOffset`; TIDAK ada perubahan lain di file ini.
+- `src/ui/ChatApp.tsx` — intercept mouse di `useInput`
+  SEBELUM splitter atomik (tanpa ini sequence wheel
+  dicacah jadi karakter `"[<64;10;5M"` yang terketik ke
+  draft); wheel membatalkan animasi PgUp yang sedang jalan
+  (Freebuff: user scroll membatalkan animasi) lalu
+  diterapkan LANGSUNG via `setScrollOffsetBoth` (tanpa
+  animasi 200ms — fling mengirim banyak event sekaligus);
+  saat picker terbuka wheel memindah seleksi picker
+  (`pickerPrev/pickerNext`), saat palette terbuka memindah
+  seleksi palette (`palettePrevIndex/paletteNextIndex`),
+  selebihnya menggulir riwayat. **Regresi yang ditemukan
+  suite PTY (2026-11-09, SUDAH DIPERBAIKI):** versi pertama
+  menulis `if (rest.length === 0) return;` — padahal event
+  key-only (Arrow Up/Down, PgUp/PgDn, Tab, Esc) tiba dari
+  Ink dengan `input === ""` dan maknanya di flag `key`
+  (dibuktikan probe2: semua enam tombol itu `len: 0` +
+  flag), jadi semuanya tertelan dan s2/s10/s15/s16/s17/s23
+  gagal (21 check). Perbaikan: bila `rest` kosong DAN
+  `inputKey` kosong, tetap panggil `handleAtomicKey("",
+  key)` — persis perilaku pra-mouse untuk input panjang
+  <= 1. Routing key-only ini tidak bisa di-unit-test
+  (hidup di callback `useInput` ChatApp); yang menjaganya
+  adalah skenario PTY s2/s10/s15/s16/s17/s23. Auto-scroll 50ms yang sudah
+  ada TIDAK diubah: ia hanya snap ke 0 bila
+  `scrollOffset <= 1`, jadi baca riwayat lama saat streaming
+  tidak ditarik ke bawah, dan di paling bawah respons baru
+  tetap auto-follow. Input prompt, status bar, Markdown
+  renderer, warna, gutter, agent runtime, tool calling —
+  TIDAK disentuh.
+- `src/commands.ts` `cmdChat` — enable mouse reporting
+  sebelum `render()`, disable sesudah `waitUntilExit()` +
+  guard `process.on("exit")` (idempotent) supaya crash/
+  exit tidak meninggalkan shell dalam mouse mode. Hanya
+  untuk TUI chat; layar one-shot (models/account) tidak
+  mengaktifkannya. Hard kill (SIGKILL) tidak bisa menjalankan
+  guard — reset manual:
+  `printf '\e[?1006l\e[?1002l\e[?1000l'`.
+- Backup: `.bak-20261109-scroll/` (ChatApp.tsx,
+  commands.ts, layout.ts, layout.test.mjs, tui-pty.sh).
+
+**Dampak mouse mode terhadap seleksi teks (diperiksa,
+bukan diasumsikan):** selama TUI jalan, terminal mengirim
+klik/drag ke aplikasi, bukan seleksi native. Termux:
+long-press selection TETAP jalan (bypass saat selecting).
+Desktop: Shift+drag biasanya bypass app mouse mode
+(tergantung terminal). Mouse mode mati lagi begitu TUI
+keluar, jadi seleksi shell normal kembali.
+
+**Tes:**
+- `test/mouse.test.mjs` (BARU, 8 tes): enable/disable =
+  set DECSET OpenTUI; wheel 64/65 dengan/tanpa ESC; burst
+  fling multi-event berurutan; klik/drag/motion/release/
+  wheel horizontal ditelan; teks biasa lolos utuh; wheel +
+  teks dalam satu delivery terpisah benar; sequence terbelah
+  dua read ditelan; wheel + modifier (Ctrl/Shift) tetap
+  scroll.
+- `test/layout.test.mjs` — `wheelScrollOffset` (1 tes,
+  11 assert): 1 baris per tick, clamp atas/bawah, burst 3.
+- `npm test`: **176/176 lolos** (167 lama + 9 baru).
+- `bash test/tui-pty.sh`: **s28 (BARU, 19 check)** —
+  helper `wheel()`/`tap()` injeksi SGR via
+  `tmux send-keys -H` (satu write membawa N event, seperti
+  fling Termux): bottom → wheel ke top (indikator tepat 1,
+  H1 tampil) → down 12 (indikator 13) → up 5 (indikator 8)
+  → kembali ke bottom (tanpa indikator) → tap tidak
+  mengubah view dan tidak mengetik apa pun → wheel ke atas
+  DI TENGAH streaming, stream selesai, view TETAP di atas
+  (tidak di-yank ke bawah) → 40 kol (top = 1, down 8 = 9,
+  tanpa marker `~~`). Angka indikator: hiddenAbove =
+  maxOffset − offset + 1 saat baris indikator tampil (baris
+  itu memakan 1 baris budget pesan) — di top selalu tepat 1
+  apa pun totalnya, jadi check berjangkar di top, bukan di
+  maxOffset yang tergantung konten mock. Suite penuh:
+  **190/190 lolos** (lihat §5).
+- `bash test/agent-pty.sh`: **27/27 lolos** (tidak berubah).
+
+**Screenshot (dicek visual sendiri):**
+`docs/images/wheel-s28-80-top.png`,
+`wheel-s28-80-down12.png`, `wheel-s28-80-streaming.png`,
+`wheel-s28-40-down8.png` (render dari capture tmux asli
+s28).
+
+**Yang BELUM terverifikasi — jujur, jangan diklaim:**
+- Swipe di HP Android FISIK belum dites (tidak ada perangkat
+  Android di sini). Rantai bukti: source Termux (doScroll →
+  wheel 64/65 SGR) + probe Ink (SGR sampai utuh ke useInput)
+  + PTY s28 (injeksi SGR byte-identik). Verifikasi live di
+  Termux Reza tetap diperlukan sebelum klaim "swipe jalan".
+- Wheel desktop (iTerm2/WezTerm/Kitty/Windows Terminal/
+  GNOME Terminal) memakai byte SGR yang sama saat 1006h
+  aktif — mekanisme sama, tapi belum dites di tiap terminal
+  itu (hanya tmux di Linux).
+- Mouse mode di terminal yang tidak mendukung SGR (pra-1006)
+  tidak dites; X10 tidak didukung (lihat atas).
+
+## 5. Hasil build + test
+
+
+- `npx tsc` (strict): BERSIH.
+- `npm test`: **176/176 lolos** (167 sesudah Markdown + 9 baru
+  wheel: 8 `test/mouse.test.mjs` + 1 `wheelScrollOffset` di
+  `test/layout.test.mjs`).
+- `bash test/tui-pty.sh`: **190/190 lolos** (171 sesudah Markdown
+  + 19 s28 baru wheel: top-anchored 1/13/8, tap ditelan, streaming
+  tanpa yank, 40 kol; SERTA perbaikan regresi key-only —
+  versi pertama intercept mouse menelan event Arrow/PgUp/Tab/Esc
+  yang tiba dengan `input === ""`, 21 check s2/s10/s15/s16/s17/s23
+  sempat gagal, diperbaiki dan suite penuh hijau lagi).
+- `bash test/agent-pty.sh`: **27/27 lolos** (tidak berubah;
+  A1 membuktikan agen jalan BY DEFAULT dari welcome screen).
   - Parser: chunk boundary per karakter, multi tool call, JSON rusak
     → parse error, tag tak tertutup → parse error.
   - Tool: baca/tulis/edit/grep/glob di direktori sementara, path
@@ -575,6 +1306,13 @@ perilaku agen koding kelihatan, mode di status bar.
 | `docs/images/agent-done-desktop.png` | 80×24: run selesai — teks akhir + `Task completed ✓ task completed: selesai`, footer `Agent: Build` |
 | `docs/images/agent-confirm-small.png` | 40×15: kotak konfirmasi + footer `glm-5.3-flash · Agent: Build` |
 | `docs/images/agent-done-small.png` | 40×15: run selesai di terminal kecil |
+| `docs/images/text-rendering-s25-small.png` | 80×24 (0.1.8): showcase Markdown — heading kuning bold, italic, strikethrough redup, task list `[x]`/`[ ]`, blockquote `> `, tabel box-drawing header kuning, inline code oranye di bg abu, link biru |
+| `docs/images/text-rendering-s25-desktop.png` | 120×36 (0.1.8): showcase sama di desktop — divider ter-cap 80 kolom (tidak melebar penuh) |
+| `docs/images/markdown-s27-80-top.png` | 80×24 (0.1.8 §4h): showcase sintaks lengkap — H1/H2 kuning, bold/italic/strike/bold+italic, inline code oranye, task list, numbered list, blockquote; tanpa marker mentah |
+| `docs/images/markdown-s27-80-bottom.png` | 80×24 (0.1.8 §4h): tabel 3 kolom header kuning, divider, code block `// js` + body di bg abu, link biru |
+| `docs/images/markdown-s27-40-top.png` | 40×15 (0.1.8 §4h): span `~~` yang membelah wrap TIDAK bocor — regresi §4g tertutup di level TUI |
+| `docs/images/markdown-s26-80.png` | 80×24 (0.1.8 §4h): spacing blok Freebuff di showcase s26 — divider 74 saat scrollbar tampil, gutter tetap kol 2 |
+| `docs/images/markdown-s26-120.png` | 120×36 (0.1.8 §4h): showcase sama di desktop — divider cap 80, semua blok terlihat, tanpa scrollbar |
 
 Catatan visual: di terminal kecil, perintah + cwd di kotak konfirmasi
 dipotong tengah (`…`) supaya tidak wrap berantakan; hasil tool yang
@@ -583,6 +1321,16 @@ panjang dirapikan jadi satu baris ringkas (120 karakter, newline →
 
 ## 7. Yang BELUM terverifikasi live (jangan diklaim sudah)
 
+- **Text rendering + Markdown 0.1.8 di Termux Reza (live, model
+  asli) — BELUM terverifikasi.** Semua bukti di atas memakai
+  mock server (tmux + `MOCK_MARKDOWN=1` /
+  `MOCK_MARKDOWN_FULL=1`) dan unit test. Cacat §4g (marker `~~`
+  bocor di lebar sempit) SUDAH diperbaiki di level renderer
+  (§4h) dan dibuktikan di mock 40 kol — tapi rendering
+  Markdown dari model ASLI di Termux (wrapping jawaban panjang,
+  tabel lebar, code fence saat streaming) baru terbukti bila
+  Reza mencoba 0.1.8 live — publish hanya bila dia bilang
+  "gaz".
 - **Model gratis panel mana yang bisa mengikuti format XML tool call
   — BELUM terverifikasi.** Semua uji agen di atas memakai mock model
   (skrip) atau mock server. Belum ada satu pun panggilan live ke

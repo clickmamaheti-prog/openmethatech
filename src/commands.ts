@@ -18,6 +18,7 @@ import { getSubscription, getTotalUsageCents, listModels, ApiError, requestDevic
 import ChatApp from "./ui/ChatApp.js";
 import ModelsScreen from "./ui/ModelsScreen.js";
 import AccountScreen from "./ui/AccountScreen.js";
+import { MOUSE_DISABLE, MOUSE_ENABLE } from "./ui/mouse.js";
 
 function tryOpenUrl(url: string): void {
   const opener =
@@ -285,6 +286,23 @@ async function cmdChat(modelOpt?: string, opts?: { clearScreen?: boolean }): Pro
   // screen from the top row. (Was conditional on coming from login only,
   // which left `$ methatech` visible above the header on a plain start.)
   process.stdout.write("\x1b[2J\x1b[H");
+  // Mouse reporting (SGR, see ./ui/mouse.ts): the terminal reports
+  // wheel notches while the TUI runs, so a Termux finger swipe
+  // arrives as wheel events and ChatApp can scroll the history
+  // (Freebuff's renderer enables the same DECSET set). Scoped to
+  // the chat TUI only — the one-shot screens never enable it.
+  // Disabled again on exit, including process.exit() paths, so a
+  // crash/exit never leaves the shell in mouse mode (where clicks
+  // would stop selecting text). A hard kill (SIGKILL) cannot run
+  // the guard; reset then with: printf '\e[?1006l\e[?1002l\e[?1000l'.
+  process.stdout.write(MOUSE_ENABLE);
+  let mouseDisabled = false;
+  const disableMouse = () => {
+    if (mouseDisabled) return;
+    mouseDisabled = true;
+    process.stdout.write(MOUSE_DISABLE);
+  };
+  process.on("exit", disableMouse);
   const app = render(
     React.createElement(ChatApp, { apiKey, initialModel: model, catalog, balanceUsd: balance }),
     // exitOnCtrlC: false — Ctrl+C MUST reach ChatApp's own priority
@@ -297,6 +315,7 @@ async function cmdChat(modelOpt?: string, opts?: { clearScreen?: boolean }): Pro
     { exitOnCtrlC: false },
   );
   await app.waitUntilExit();
+  disableMouse();
 }
 
 async function cmdModels(): Promise<void> {

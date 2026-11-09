@@ -60,6 +60,7 @@ import {
   LOGIN_URL,
 } from "../config.js";
 import { phaseLabel, formatElapsedTime } from "./thinking.js";
+import { sanitizeTerminalOutput, sanitizeTerminalText } from "./terminal-safe.js";
 import {
   AUTO_SCROLL_DELAY_MS,
   SCROLL_ANIMATION_DURATION_MS,
@@ -67,6 +68,7 @@ import {
   easeOutCubic,
   scrollbarThumbRange,
   INPUT_PLACEHOLDER,
+  SIDE_GUTTER,
   breakpoints,
   flattenMessages,
   inputBoxRowsFor,
@@ -77,12 +79,14 @@ import {
   pickerMaxRowsFor,
   pickerRenderedRows,
   welcomeLayout,
+  wheelScrollOffset,
   windowLines,
   wrapLineCount,
   STARTER_PROMPTS,
 } from "./layout.js";
 import { filterCommands, paletteClampIndex, paletteNextIndex, palettePrevIndex } from "./palette.js";
 import { flattenGroups, groupCatalog, isLocked, lockedExplanation, pickerNext, pickerPrev } from "./picker.js";
+import { parseMouseInput, WHEEL_LINES } from "./mouse.js";
 import { parseSlashContext, suggestionMaxVisible } from "./suggestions.js";
 import {
   EXIT_WARNING_TIMEOUT_MS,
@@ -102,6 +106,18 @@ type DisplayMessage = ChatMessage & {
   thinkingComplete?: boolean;
   /** To-do list for kind "todos" (Freebuff shape: {task, completed}). */
   todos?: { task: string; completed: boolean }[];
+  /**
+   * Structured tool call for kind "tool" (Freebuff ToolCallItem +
+   * TerminalCommandDisplay). The layout renders the preview BOLD
+   * and each result ✓ in success green / ✗ in error red; `content`
+   * keeps the plain-text rendering for any other consumer.
+   */
+  tool?: {
+    name: string;
+    preview: string;
+    shell: boolean;
+    results: { ok: boolean; text: string }[];
+  };
 };
 
 interface ChatAppProps {
@@ -157,6 +173,16 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
   const columns = stdout.columns ?? 80;
   const rows = stdout.rows ?? 24;
   const contentWidth = Math.max(20, columns - 4);
+  // Message text width: the message box's own SIDE_GUTTER
+  // (Freebuff message-with-agents.tsx:105, SIDE_GUTTER = 1) comes out
+  // of the wrap width — flattenMessages prepends the gutter to every
+  // line, so text starts at column 2 (root padding 1 + gutter 1) and
+  // its right edge stays exactly where it was (the spare column in
+  // contentWidth is the right-side gutter). The scrollbar pass takes
+  // one more column for the track, as before. Narrow terminals stay
+  // safe: contentWidth floors at 20, so messageWidth never drops
+  // below 19 — no static padding number can break a small terminal.
+  const messageWidth = contentWidth - SIDE_GUTTER;
   // Freebuff-style breakpoints (layout.ts): width xs < 50, sm 50-100,
   // md 100-150, lg > 150; height xs < 20, sm 20-40, md > 40. The header
   // stacks in two rows on narrow terminals (xs width), as before.
@@ -268,6 +294,10 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
   const pickerSelectedRef = useRef(0);
   const paletteSelectedRef = useRef(0);
   const scrollOffsetRef = useRef(0);
+  // A mouse sequence Ink delivered in two pieces (see ./mouse.ts):
+  // the first half was swallowed and this flag remembers to swallow
+  // the second half instead of typing it into the draft.
+  const mouseFragmentPendingRef = useRef(false);
   const setScrollOffsetBoth = (offset: number) => {
     scrollOffsetRef.current = offset;
     setScrollOffset(offset);
@@ -497,11 +527,11 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
   // has no scrollbox, so the track is a trailing column on every
   // message-area row; lines are re-wrapped one column narrower while
   // it shows, so no text is ever pushed out of the viewport.
-  const flatLinesFull = flattenMessages(messages, contentWidth, { thinkingExpanded });
+  const flatLinesFull = flattenMessages(messages, messageWidth, { thinkingExpanded });
   const showScrollbar =
     !showWelcome && !sending && flatLinesFull.length > messageAvailable;
   const flatLines = showScrollbar
-    ? flattenMessages(messages, contentWidth - 1, { thinkingExpanded })
+    ? flattenMessages(messages, messageWidth - 1, { thinkingExpanded })
     : flatLinesFull;
   let linesBudget = messageAvailable;
   let windowed = windowLines(flatLines, linesBudget, scrollOffset);
@@ -600,22 +630,47 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
   }
 
   const pushSystem = (content: string) => {
-    setMessages((m) => [...m, { role: "assistant", content, kind: "system", ts: Date.now() }]);
+    // System lines are rendered through the layout, so any escape
+    // sequence in them (a provider error string, a stop reason)
+    // would reach the terminal raw — strip it first.
+    setMessages((m) => [...m, { role: "assistant", content: sanitizeTerminalText(content), kind: "system", ts: Date.now() }]);
   };
 
   // ---- Agent helpers ----
-  const pushTool = (content: string) => {
-    setMessages((m) => [...m, { role: "assistant", content, kind: "tool", ts: Date.now() }]);
+  const pushTool = (preview: string, toolName: string) => {
+    const clean = sanitizeTerminalText(preview);
+    setMessages((m) => [
+      ...m,
+      {
+        role: "assistant",
+        content: clean,
+        kind: "tool",
+        ts: Date.now(),
+        tool: { name: toolName, preview: clean, shell: clean.startsWith("$ "), results: [] },
+      },
+    ]);
   };
-  /** Append a result line to the last tool message (the to-do list is
-      its own kind now, so it is never a target). */
-  const appendToLastTool = (line: string) => {
+  /**
+   * Append a result line to the last tool message (the to-do list is
+   * its own kind now, so it is never a target). The structured
+   * result keeps the real status (✓ green / ✗ red in the layout);
+   * `content` keeps the plain-text rendering for any other consumer.
+   */
+  const appendToLastTool = (summary: string, ok: boolean) => {
+    // The summary is tool output / file content (external text):
+    // strip escapes and collapse progress-bar redraws before it
+    // reaches the layout. The layout adds its own ✓/✗ marker, so
+    // the stored text is the plain summary, not the decorated line.
+    const clean = sanitizeTerminalOutput(summary);
     setMessages((m) => {
       const copy = [...m];
       for (let i = copy.length - 1; i >= 0; i--) {
         const msg = copy[i];
         if (msg && msg.kind === "tool") {
-          copy[i] = { ...msg, content: `${msg.content}\n${line}` };
+          const tool = msg.tool
+            ? { ...msg.tool, results: [...msg.tool.results, { ok, text: clean }] }
+            : undefined;
+          copy[i] = { ...msg, content: `${msg.content}\n  ${ok ? "✓" : "✗"} ${clean}`, tool };
           return copy;
         }
       }
@@ -642,6 +697,13 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
   };
   /** Append streamed agent text to the last assistant chat message. */
   const appendAssistantText = (delta: string) => {
+    // Stored raw on purpose: an escape sequence split across two
+    // stream chunks would be corrupted by per-delta sanitizing
+    // (the parameter bytes of the second half would leak as plain
+    // text). flattenMessages sanitizes the full reassembled content
+    // at the render boundary instead, where a split sequence is
+    // whole again. The raw stream still feeds the agent history in
+    // loop.ts — only the display copy is cleaned, at render time.
     setMessages((m) => {
       const copy = [...m];
       for (let i = copy.length - 1; i >= 0; i--) {
@@ -777,7 +839,7 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
           } else if (e.type === "step") {
             setAgentSteps(e.step);
           } else if (e.type === "tool_call") {
-            pushTool(e.preview);
+            pushTool(e.preview, e.toolName);
           } else if (e.type === "tool_result") {
             // Freebuff tool-branch.tsx: run_terminal_command shows the
             // LAST 3 output lines ("...\n" + preview when more). The
@@ -801,7 +863,7 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
             } else {
               summary = e.output.replace(/\s+/g, " ").trim().slice(0, 120);
             }
-            appendToLastTool(`  ${e.ok ? "✓" : "✗"} ${summary}`);
+            appendToLastTool(summary, e.ok);
           } else if (e.type === "todos") {
             agentTodosRef.current = e.todos;
             setAgentTodos(e.todos);
@@ -857,7 +919,9 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
         pushSystem("Request dibatalkan.");
       } else {
         const message = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
-        setError(message);
+        // Provider-supplied text reaches the terminal through the
+        // error block — strip escapes before storing it.
+        setError(sanitizeTerminalText(message));
         setMessages((m) => {
           const copy = [...m];
           for (let i = copy.length - 1; i >= 0; i--) {
@@ -902,12 +966,19 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
         onUsage: () => undefined,
       }, 1024);
       agentHistoryRef.current = [];
-      setMessages([{ role: "assistant", content: `Ringkasan percakapan:\n${summary}`, kind: "system", ts: Date.now() }]);
+      setMessages([
+        {
+          role: "assistant",
+          content: `Ringkasan percakapan:\n${sanitizeTerminalText(summary)}`,
+          kind: "system",
+          ts: Date.now(),
+        },
+      ]);
       setLastUsage(null);
       setScrollOffsetBoth(0);
     } catch (e) {
       const message = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
-      setError(message);
+      setError(sanitizeTerminalText(message));
     } finally {
       sendingRef.current = false;
       setSending(false);
@@ -1261,12 +1332,63 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
   // runs back into atomic keypresses and run each through the same handler,
   // in order. CRLF counts as one Return.
   useInput((inputKey, key) => {
-    if (inputKey.length <= 1) {
-      handleAtomicKey(inputKey, key);
+    // Mouse input (SGR wheel/click, see ./mouse.ts) is intercepted
+    // BEFORE the atomic splitter below: fed through it, a wheel
+    // sequence would be shredded into "[<64;10;5M" characters typed
+    // into the draft. Wheel notches scroll immediately (no 200ms
+    // page animation — a fling sends many events in a burst);
+    // clicks/drags/motion are consumed silently; any non-mouse text
+    // in the same delivery falls through to the keyboard path.
+    const mouse = parseMouseInput(inputKey, mouseFragmentPendingRef.current);
+    mouseFragmentPendingRef.current = mouse.fragmentPending;
+    if (mouse.wheels.length > 0) {
+      // A wheel event is a user scroll (Freebuff handleScrollChange):
+      // cancel any running page animation so the view follows the
+      // finger instead of fighting the animation.
+      cancelScrollAnimation();
+      const curPickerOpen = pickerOpenRef.current;
+      const curPaletteOpen = parseSlashContext(inputRef.current).active && !curPickerOpen;
+      for (const dir of mouse.wheels) {
+        if (curPickerOpen) {
+          lockedWarnedRef.current = null;
+          setPickerSelectedBoth(
+            dir === "up"
+              ? pickerPrev(pickerSelectedRef.current, flatModels.length)
+              : pickerNext(pickerSelectedRef.current, flatModels.length),
+          );
+        } else if (curPaletteOpen) {
+          const count = filterCommands(parseSlashContext(inputRef.current).query).length;
+          setPaletteSelectedBoth(
+            dir === "up"
+              ? palettePrevIndex(paletteSelectedRef.current, count)
+              : paletteNextIndex(paletteSelectedRef.current, count),
+          );
+        } else {
+          setScrollOffsetBoth(
+            wheelScrollOffset(scrollOffsetRef.current, dir, WHEEL_LINES, messageAvailable, flatLines.length),
+          );
+        }
+      }
+    }
+    const text = mouse.rest;
+    if (text.length === 0) {
+      // Pure mouse delivery (wheel-only, click): nothing for the
+      // keyboard path. But a KEY-ONLY event — arrows, PgUp/PgDn,
+      // Tab, Esc arrive with input "" and the meaning in `key`
+      // (verified by probe 2026-11-09) — must still reach the
+      // resolver: the pre-mouse code called handleAtomicKey for
+      // every input of length <= 1, including "". Swallowing it
+      // here broke Down/PgUp/Tab/Esc/Up outright (s2/s10/s15/
+      // s16/s17/s23 regressions, 2026-11-09).
+      if (inputKey.length === 0) handleAtomicKey("", key);
+      return;
+    }
+    if (text.length <= 1) {
+      handleAtomicKey(text, key);
       return;
     }
     let lastWasReturn = false;
-    for (const ch of inputKey) {
+    for (const ch of text) {
       if (ch === "\r") {
         if (lastWasReturn) continue; // CRLF = one Return.
         lastWasReturn = true;
@@ -1296,6 +1418,15 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
     }
   });
 
+  // Horizontal gutters, layered exactly like Freebuff (see SIDE_GUTTER
+  // in layout.ts): this root Box is the scroll container (chat.tsx
+  // scrollbox contentOptions paddingLeft 1 / paddingRight 2, right 2 =
+  // 1 gutter + 1 scrollbar track — Ink renders the track as a trailing
+  // column, so the root only needs paddingX 1). On top of it: the
+  // message box adds SIDE_GUTTER 1 (message text at col 2), the header
+  // adds paddingLeft 1 (header text at col 2), the footer/status row
+  // stays at col 1 (status-bar.tsx root-level padding 1), and the
+  // input box keeps its border at col 1 with 1 space inside.
   return (
     <Box
       flexDirection="column"
@@ -1304,8 +1435,11 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
       width={columns}
       height={rows}
     >
-      {/* Header: row 0 (wide: 1 row, narrow: 2 rows). */}
-      <Box flexDirection="column">
+      {/* Header: row 0 (wide: 1 row, narrow: 2 rows). paddingLeft 1 on
+          top of the root padding (Freebuff chat-header.tsx:46-47:
+          paddingLeft 1 inside the scrollbox) puts the header text at
+          column 2, aligned with the message text. */}
+      <Box flexDirection="column" paddingLeft={1}>
         <Box>
           <Text color={theme.accent} bold>
             MethaTech
@@ -1378,6 +1512,7 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
                   bold={seg.bold}
                   italic={seg.italic}
                   strikethrough={seg.strikethrough}
+                  dimColor={seg.dim}
                   backgroundColor={seg.backgroundColor}
                 >
                   {seg.text}
@@ -1417,6 +1552,7 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
                       bold={seg.bold}
                       italic={seg.italic}
                       strikethrough={seg.strikethrough}
+                      dimColor={seg.dim}
                       backgroundColor={seg.backgroundColor}
                     >
                       {seg.text}
