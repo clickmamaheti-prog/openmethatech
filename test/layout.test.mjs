@@ -230,6 +230,32 @@ test("flattenMessages: reasoning renders as a Thinking block before the answer",
   assert.ok(texts.includes("answer"));
 });
 
+test("flattenMessages: one blank line between the Thinking block and the answer (Freebuff message-block gap: 1)", () => {
+  const thinking = "short reasoning";
+  const lines = flattenMessages(
+    [{ role: "assistant", content: "answer", kind: "chat", thinking, thinkingComplete: true }],
+    40,
+  );
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  // Header, preview line, blank gap, answer, trailing blank.
+  assert.ok(texts[0].includes("Thinking"));
+  assert.ok(texts[1].includes("short reasoning"));
+  assert.equal(texts[2].trim(), "", "blank line separates the Thinking block from the answer");
+  assert.equal(texts[3], "answer");
+});
+
+test("flattenMessages: no gap blank line when the answer is empty (still streaming)", () => {
+  const lines = flattenMessages(
+    [{ role: "assistant", content: "", kind: "chat", thinking: "short reasoning", thinkingComplete: false }],
+    40,
+  );
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  assert.ok(texts[0].includes("Thinking"));
+  assert.ok(texts[1].includes("short reasoning"));
+  // Only the message's own trailing blank line follows.
+  assert.equal(texts.filter((t) => t.trim() === "").length, 1);
+});
+
 test("flattenMessages: lone **bold** reasoning under 100 chars is hidden", () => {
   const lines = flattenMessages(
     [{ role: "assistant", content: "answer", kind: "chat", thinking: "**Just a title**", thinkingComplete: true }],

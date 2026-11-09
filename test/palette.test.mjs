@@ -10,16 +10,24 @@ import {
   paletteClampIndex,
 } from "../dist/ui/palette.js";
 
-test("COMMANDS lists exactly the 13 supported commands", () => {
+test("COMMANDS lists exactly the 12 supported commands (no /agent: Freebuff has no agent toggle — the agent IS the chat)", () => {
   assert.deepEqual(
     COMMANDS.map((c) => c.name),
-    ["model", "models", "agent", "mode", "init", "compact", "export", "clear", "help", "account", "keys", "topup", "exit"],
+    ["model", "models", "mode", "init", "compact", "export", "clear", "help", "account", "keys", "topup", "exit"],
   );
 });
 
 test("filterCommands: empty query returns the full list", () => {
-  assert.equal(filterCommands("").length, 13);
-  assert.equal(filterCommands("   ").length, 13);
+  assert.equal(filterCommands("").length, 12);
+  assert.equal(filterCommands("   ").length, 12);
+});
+
+test("filterCommands: no command named /agent (typing it by hand still prints the always-on status)", () => {
+  // "agent" still matches /init via its description ("AGENTS.md") —
+  // the Freebuff-style filter matches descriptions too. The point is
+  // no command named "agent" exists to select.
+  assert.ok(!filterCommands("agent").some((c) => c.name === "agent"));
+  assert.ok(!COMMANDS.some((c) => c.name === "agent"));
 });
 
 test("filterCommands: prefix match", () => {

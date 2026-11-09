@@ -27,8 +27,8 @@
 // CodeBlock (theme syntax colors). Reasoning the server sends
 // (delta.reasoning_content) renders as a collapsible "Thinking" block
 // BEFORE the answer (Freebuff thinking.tsx: 5-line preview + toggle).
-// DiffView is exported from ui/index.ts, ready for the future coding
-// agent — no agent is built in this phase.
+// The agent loop IS the chat (Freebuff: no plain-chat mode — every
+// message runs through the agent step with tools).
 
 import React, { useEffect, useRef, useState } from "react";
 import fs from "node:fs";
@@ -122,7 +122,6 @@ function truncateMiddle(s: string, max: number): string {
 const HELP_LINES = [
   "/models — lihat daftar model",
   "/model — pilih model (atau /model <id> langsung)",
-  "/agent — nyalakan/matikan agen koding (mode Default)",
   "/mode [default|lite|max|plan] — ganti mode agen",
   "/init — baca codebase, buat AGENTS.md",
   "/compact — ringkas percakapan",
@@ -217,16 +216,22 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
   const [startersShown, setStartersShown] = useState(() => !hasSubmittedFirstPrompt());
 
   // ---- Coding agent (Freebuff adoption, Fase 1–2) ----
-  // Chat biasa tetap default; agen aktif lewat /agent. Mode tampil di
-  // status bar (footer line 1). Nama mode mengikuti Freebuff:
-  // Default / Lite / Max / Plan (AGENT-ADOPTION.md §5 — tidak ada
-  // mode "Build" atau "YOLO" di Freebuff).
-  const [agentEnabled, setAgentEnabled] = useState(false);
+  // Freebuff HAS NO plain-chat mode: every message goes through
+  // onSubmitPrompt(content, agentMode) (cli/src/chat.tsx,
+  // use-chat-input.ts) into the agent step with tools. MethaTech
+  // follows: the agent loop IS the chat — every non-slash message
+  // runs through it, with the agent system prompt (tools + project
+  // context: file tree, cwd, knowledge files, git changes). A plain
+  // question just gets a text-only answer (the loop ends the turn
+  // when a step returns no tool calls). Mode tampil di status bar
+  // (footer line 1). Nama mode mengikuti Freebuff: Default / Lite /
+  // Max / Plan (AGENT-ADOPTION.md §5 — tidak ada mode "Build" atau
+  // "YOLO" di Freebuff). There is no /agent toggle anymore: /agent
+  // only reports that the agent is always on.
   const [agentMode, setAgentMode] = useState<AgentMode>("DEFAULT");
   const [agentRunning, setAgentRunning] = useState(false);
   const [agentSteps, setAgentSteps] = useState(0);
   const [agentTodos, setAgentTodos] = useState<TodoItem[]>([]);
-  const agentEnabledRef = useRef(false);
   const agentModeRef = useRef<AgentMode>("DEFAULT");
   const agentTodosRef = useRef<TodoItem[]>([]);
   // Agent loop history (system prompt + turns), kept across turns so
@@ -540,21 +545,29 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
       : firstUserPrompt.length > 24
         ? `${firstUserPrompt.slice(0, 24)}…`
         : firstUserPrompt;
-  // Agent segment goes BEFORE the Chat name so it survives the
-  // slice-to-width: the chat name (user text) is the expendable part.
-  const agentSeg = agentEnabled ? ` · Agent: ${modeDisplayName(agentMode)}` : "";
-  const footerFull = `${model} • ${free ? "FREE $0.00" : (priceText ?? "harga —")} · ${cwd} · /model to change${agentSeg} · Chat: ${chatName}`;
-  // The cwd segment drops out when the line would overflow (80 cols
-  // cannot fit model + full path + Chat name) — model and Chat name
-  // always survive.
+  // Agent segment is ALWAYS shown (Freebuff: the agent is the chat,
+  // there is no plain-chat mode to fall back to).
+  const agentSeg = ` · Agent: ${modeDisplayName(agentMode)}`;
+  // Footer price is the short "FREE" (the header already shows
+  // "FREE $0.00"); the "$0.00" here only pushed the line past 80 cols
+  // and cut the Chat name to "New cha".
+  const priceSeg = free ? "FREE" : (priceText ?? "harga —");
+  const footerFull = `${model} • ${priceSeg} · ${cwd} · /model to change${agentSeg} · Chat: ${chatName}`;
+  // Cascade when the line would overflow (render slices to columns-2):
+  // cwd drops first, then the Chat name (expendable per the old
+  // comment) — model, price, /model hint and Agent mode always survive.
+  const footerNoCwd = `${model} • ${priceSeg} · /model to change${agentSeg} · Chat: ${chatName}`;
+  const footerNoChat = `${model} • ${priceSeg} · /model to change${agentSeg}`;
   const footerLine =
     footerFull.length <= columns - 2
       ? footerFull
-      : `${model} • ${free ? "FREE $0.00" : (priceText ?? "harga —")} · /model to change${agentSeg} · Chat: ${chatName}`;
+      : footerNoCwd.length <= columns - 2
+        ? footerNoCwd
+        : footerNoChat;
   // Narrow terminals (40 cols) cannot fit model + price + Chat name:
-  // when the agent is on, the mode is the must-show segment.
+  // the agent mode is the must-show segment (agent is always on).
   const footerLineShown =
-    narrow && agentEnabled ? `${model} · Agent: ${modeDisplayName(agentMode)}` : footerLine;
+    narrow ? `${model} · Agent: ${modeDisplayName(agentMode)}` : footerLine;
   // Footer, line 2: usage of the last answer + scroll position +
   // history/help hints. Narrow terminals get the short hint. The
   // scroll part is the Freebuff scroll-to-bottom button's affordance
@@ -676,113 +689,6 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
     if (setModelById(id)) pushSystem(`Model aktif: ${id}`);
   };
 
-  const send = async (text: string) => {
-    if (sendingRef.current) return;
-    // Out-of-credits guard (priority 0, send-time): a paid model with
-    // a $0 balance never reaches the API — explain + point at top-up
-    // instead. Free models always go through.
-    const currentModel = modelRef.current;
-    if (!isFreeModel(currentModel) && balanceUsd !== null && balanceUsd <= 0) {
-      const entry = catalog.entries.find((e) => e.id === currentModel);
-      pushSystem(
-        entry
-          ? lockedExplanation(entry)
-          : `${currentModel} is a paid model and your balance is $0.00. Top up first: ${TOPUP_URL}`,
-      );
-      tryOpenUrl(TOPUP_URL);
-      return;
-    }
-    // First prompt sent: starter prompts disappear permanently.
-    if (startersShownRef.current) {
-      startersShownRef.current = false;
-      setStartersShown(false);
-      markFirstPromptSubmitted();
-    }
-    historyRef.current = [...historyRef.current, text];
-    historyIdxRef.current = -1;
-    lastEditDueToNavRef.current = false;
-    sendingRef.current = true;
-    sendStartRef.current = Date.now();
-    setElapsedSec(0);
-    setSending(true);
-    setGotFirstDelta(false);
-    setError(null);
-    setScrollOffsetBoth(0); // Own message goes to the bottom.
-    const history: ChatMessage[] = [...messagesRef.current.filter((m) => m.kind === "chat"), { role: "user", content: text }];
-    const now = Date.now();
-    setMessages((m) => [...m, { role: "user", content: text, kind: "chat", ts: now }]);
-    // Placeholder assistant message, filled by the stream (its
-    // `thinking` fills from delta.reasoning_content, when sent).
-    setMessages((m) => [...m, { role: "assistant", content: "", kind: "chat", ts: now, thinking: "" }]);
-    const abort = new AbortController();
-    abortRef.current = abort;
-    try {
-      const { usage } = await streamChat(apiKey, currentModel, history, {
-        onDelta: (delta) => {
-          setGotFirstDelta(true);
-          setMessages((m) => {
-            const copy = [...m];
-            const last = copy[copy.length - 1];
-            if (last && last.role === "assistant") {
-              copy[copy.length - 1] = { ...last, content: last.content + delta };
-            }
-            return copy;
-          });
-        },
-        onReasoning: (reasoning) => {
-          setMessages((m) => {
-            const copy = [...m];
-            const last = copy[copy.length - 1];
-            if (last && last.role === "assistant") {
-              copy[copy.length - 1] = { ...last, thinking: (last.thinking ?? "") + reasoning };
-            }
-            return copy;
-          });
-        },
-        onUsage: (u) => setLastUsage({ usage: u, model: currentModel }),
-      }, 1024, { signal: abort.signal });
-      setMessages((m) => {
-        const copy = [...m];
-        const last = copy[copy.length - 1];
-        if (last && last.role === "assistant") {
-          copy[copy.length - 1] = { ...last, thinkingComplete: true };
-        }
-        return copy;
-      });
-      if (!usage) {
-        setLastUsage((prev) => prev);
-      }
-    } catch (e) {
-      if (abort.signal.aborted) {
-        // Interrupted by the user (Esc / Ctrl+C): keep whatever answer
-        // arrived, drop an empty placeholder, no error shown.
-        setMessages((m) => {
-          const copy = [...m];
-          const last = copy[copy.length - 1];
-          if (last && last.role === "assistant" && last.content === "") copy.pop();
-          else if (last && last.role === "assistant") {
-            copy[copy.length - 1] = { ...last, thinkingComplete: true };
-          }
-          return copy;
-        });
-        pushSystem("Request dibatalkan.");
-      } else {
-        const message = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
-        setError(message);
-        setMessages((m) => {
-          const copy = [...m];
-          const last = copy[copy.length - 1];
-          if (last && last.role === "assistant" && last.content === "") copy.pop();
-          return copy;
-        });
-      }
-    } finally {
-      abortRef.current = null;
-      sendingRef.current = false;
-      setSending(false);
-    }
-  };
-
   const showModelsList = () => {
     const freeList = catalog.entries.filter((e) => e.free).map((e) => e.id);
     const paidList = catalog.entries
@@ -793,11 +699,14 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
     );
   };
 
-  /** Agent-mode send: the same task goes through the local agent loop
-      (read/edit/shell tools, run directly like Freebuff) instead of
-      plain chat. The loop's history persists across turns in this
-      session. */
-  const sendAgent = async (text: string) => {
+  /** THE send path (Freebuff: every message goes through the agent
+      loop — cli/src/commands/router.ts:480 "send to agent" →
+      use-send-message.ts:985 client.run). The local agent loop
+      (read/edit/shell tools, run directly like Freebuff) handles the
+      task; a plain question just gets a text-only answer (the loop
+      ends the turn when a step returns no tool calls). The loop's
+      history persists across turns in this session. */
+  const send = async (text: string) => {
     if (sendingRef.current) return;
     const currentModel = modelRef.current;
     if (!isFreeModel(currentModel) && balanceUsd !== null && balanceUsd <= 0) {
@@ -849,6 +758,22 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
           if (e.type === "text") {
             setGotFirstDelta(true);
             appendAssistantText(e.text);
+          } else if (e.type === "reasoning") {
+            // Thinking card in agent mode (Freebuff thinking.tsx):
+            // reasoning accumulates on the assistant message's thinking
+            // field, same as plain chat did before the agent merge.
+            setGotFirstDelta(true);
+            setMessages((m) => {
+              const copy = [...m];
+              for (let i = copy.length - 1; i >= 0; i--) {
+                const msg = copy[i];
+                if (msg && msg.role === "assistant" && msg.kind === "chat") {
+                  copy[i] = { ...msg, thinking: (msg.thinking ?? "") + e.text };
+                  break;
+                }
+              }
+              return copy;
+            });
           } else if (e.type === "step") {
             setAgentSteps(e.step);
           } else if (e.type === "tool_call") {
@@ -882,13 +807,20 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
             setAgentTodos(e.todos);
             upsertTodosMessage(e.todos);
           } else if (e.type === "done") {
-            if (!e.completed && !e.stopReason.includes("ask_user")) {
+            // "interrupted by user" is reported once after the loop
+            // returns ("Request dibatalkan."), not here.
+            if (!e.completed && !e.stopReason.includes("ask_user") && e.stopReason !== "interrupted by user") {
               pushSystem(`Agen berhenti: ${e.stopReason}`);
             }
           }
         },
       });
       agentHistoryRef.current = result.history;
+      // Abort (Esc / Ctrl+C while streaming) used to vanish inside the
+      // agent loop; plain chat reported it as "Request dibatalkan.".
+      if (abort.signal.aborted) {
+        pushSystem("Request dibatalkan.");
+      }
       setMessages((m) => {
         const copy = [...m];
         for (let i = copy.length - 1; i >= 0; i--) {
@@ -991,13 +923,11 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
         exit();
         break;
       case "agent": {
-        const next = !agentEnabledRef.current;
-        agentEnabledRef.current = next;
-        setAgentEnabled(next);
+        // Freebuff has no agent toggle: the agent IS the chat
+        // (router.ts:480 "send to agent"). /agent only reports the
+        // always-on status, for anyone who typed it out of habit.
         pushSystem(
-          next
-            ? `Agen koding AKTIF (mode ${modeDisplayName(agentModeRef.current)}). Kirim tugas coding seperti biasa — agen membaca/mengedit file dan menjalankan perintah di folder ini (${process.cwd()}). /mode untuk ganti mode, /agent untuk kembali ke chat biasa.`
-            : "Agen koding NONAKTIF — kembali ke chat biasa.",
+          `Agen koding selalu AKTIF (mode ${modeDisplayName(agentModeRef.current)}). Kirim tugas seperti biasa — agen membaca/mengedit file dan menjalankan perintah di folder ini (${process.cwd()}). /mode untuk ganti mode.`,
         );
         break;
       }
@@ -1035,7 +965,7 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
         const file = exportConversation({
           cwd: process.cwd(),
           model: modelRef.current,
-          mode: agentEnabledRef.current ? modeDisplayName(agentModeRef.current) : "chat",
+          mode: modeDisplayName(agentModeRef.current),
           messages: messagesRef.current
             .filter((m) => m.kind === "chat")
             .map((m) => ({ role: m.role, content: m.content })),
@@ -1154,8 +1084,7 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
     ) {
       const starter = STARTER_PROMPTS[Number(inputKey) - 1];
       if (starter) {
-        if (agentEnabledRef.current) void sendAgent(starter.prompt);
-        else void send(starter.prompt);
+        void send(starter.prompt);
         return;
       }
     }
@@ -1299,7 +1228,6 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
         clearDraftEdit();
         setInputBoth("");
         if (text.startsWith("/")) handleSlash(text);
-        else if (agentEnabledRef.current) void sendAgent(text);
         else void send(text);
         return;
       }

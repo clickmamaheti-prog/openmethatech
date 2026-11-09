@@ -18,8 +18,10 @@ export interface PaletteCommand {
 export const COMMANDS: readonly PaletteCommand[] = [
   { name: "model", desc: "pilih model (atau /model <id> langsung)" },
   { name: "models", desc: "lihat daftar model" },
-  { name: "agent", desc: "nyalakan/matikan agen koding" },
-  { name: "mode", desc: "ganti mode agen (build/lite/max/plan)" },
+  // No /agent: Freebuff has no agent toggle — the agent IS the chat
+  // (router.ts:480 "send to agent"), so there is nothing to turn on.
+  // Typing /agent by hand still prints the always-on status.
+  { name: "mode", desc: "ganti mode agen (default/lite/max/plan)" },
   { name: "init", desc: "baca codebase, buat AGENTS.md" },
   { name: "compact", desc: "ringkas percakapan" },
   { name: "export", desc: "ekspor percakapan ke file Markdown" },

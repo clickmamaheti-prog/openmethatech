@@ -61,6 +61,7 @@ export const FILE_EDIT_LOOP_STOP_THRESHOLD = 6;
 
 export type AgentEvent =
   | { type: "text"; text: string }
+  | { type: "reasoning"; text: string }
   | { type: "tool_call"; toolName: string; input: Record<string, unknown>; preview: string }
   | { type: "tool_result"; toolName: string; ok: boolean; output: string }
   | { type: "step"; step: number }
@@ -78,7 +79,7 @@ export interface AgentLoopOptions {
   maxSteps?: number;
   signal?: AbortSignal;
   /** Injectable model call (tests use a mock; default is streamChat). */
-  callModel?: (messages: ChatMessage[], opts: { onDelta: (t: string) => void; signal?: AbortSignal }) => Promise<string>;
+  callModel?: (messages: ChatMessage[], opts: { onDelta: (t: string) => void; onReasoning?: (t: string) => void; signal?: AbortSignal }) => Promise<string>;
   onEvent?: (e: AgentEvent) => void;
   /** Shared to-do list (also updated live via onTodos). */
   todos?: TodoItem[];
@@ -119,13 +120,17 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
 
   const callModel =
     opts.callModel ??
-    (async (msgs: ChatMessage[], cbs: { onDelta: (t: string) => void; signal?: AbortSignal }) => {
+    (async (msgs: ChatMessage[], cbs: { onDelta: (t: string) => void; onReasoning?: (t: string) => void; signal?: AbortSignal }) => {
       let text = "";
       await streamChat(opts.apiKey, opts.model, msgs, {
         onDelta: (d) => {
           text += d;
           cbs.onDelta(d);
         },
+        // Reasoning (Thinking card) was never wired through the agent
+        // loop — plain chat had it, the agent path dropped it, so the
+        // Thinking block never rendered in agent mode (s20).
+        onReasoning: (r) => cbs.onReasoning?.(r),
         onUsage: () => undefined,
       }, 4096, { signal: cbs.signal });
       return text;
@@ -167,10 +172,16 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
           const r = parseStreamChunk(d, parserState);
           if (r.filteredText.length > 0) opts.onEvent?.({ type: "text", text: r.filteredText });
         },
+        onReasoning: (r) => opts.onEvent?.({ type: "reasoning", text: r }),
         signal: opts.signal,
       });
     } catch (e) {
-      stopReason = `model call failed: ${e instanceof Error ? e.message : String(e)}`;
+      // An abort mid-call is the user interrupting, not a model
+      // failure — the old plain-chat path reported "Request dibatalkan."
+      // and the agent loop used to swallow it as "model call failed".
+      stopReason = opts.signal?.aborted
+        ? "interrupted by user"
+        : `model call failed: ${e instanceof Error ? e.message : String(e)}`;
       break;
     }
 

@@ -395,6 +395,7 @@ export function flattenMessages(
       // thinking.tsx): preview = last 5 visual lines, italic muted,
       // "..." prefix when cut; expanded = full reasoning. A lone
       // **bold** title renders nothing. Ctrl+T toggles all blocks.
+      let thinkingRendered = false;
       if (m.thinking !== undefined && m.thinking.length > 0) {
         const preview = thinkingPreview(
           m.thinking,
@@ -403,6 +404,7 @@ export function flattenMessages(
           m.thinkingComplete === true,
         );
         if (preview.visible) {
+          thinkingRendered = true;
           lines.push({
             segments: [
               { text: `${preview.toggle}Thinking`, color: theme.text, bold: true },
@@ -423,7 +425,25 @@ export function flattenMessages(
           }
         }
       }
-      for (const part of splitMessageParts(m.content)) {
+      // Freebuff message-block.tsx:275 — the blocks container inside
+      // one message has gap: 1 (one blank line between the Thinking
+      // block and the answer text that follows). Without it the
+      // Thinking preview runs straight into the answer and the whole
+      // assistant block reads as one cramped blob of chat text
+      // ("dempet" on a narrow Termux screen). The gap appears only
+      // when there IS answer content after the thinking; a
+      // still-streaming message with reasoning but no text yet keeps
+      // just the message's own trailing blank line (Freebuff renders
+      // empty text blocks as null).
+      if (thinkingRendered && m.content.trim().length > 0) {
+        lines.push(blankLine());
+      }
+      // Freebuff single-block.tsx: an empty text block renders null
+      // (no lines at all). Without this guard an empty assistant
+      // message (the streaming placeholder, or a turn whose model
+      // only thought) emits one blank line from its empty content
+      // PLUS the message's trailing blank line — two blank rows.
+      for (const part of m.content.trim().length === 0 ? [] : splitMessageParts(m.content)) {
         if (part.type === "code") {
           // Freebuff markdown-renderer.tsx: code blocks are MONOCHROME
           // (no per-token colors) — header "// lang" in codeHeaderFg,

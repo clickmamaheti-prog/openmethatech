@@ -69,16 +69,14 @@ capture() { # capture <name>
 send() { tmux send-keys -t "$SESSION" "$@" ; sleep 0.7; }
 stop_tui() { tmux send-keys -t "$SESSION" C-c; sleep 1; tmux kill-session -t "$SESSION" 2>/dev/null; }
 
-# --- Scenario A1: /agent on, mode in footer, tool call renders, shell runs directly (no gate) ---
+# --- Scenario A1: agent runs BY DEFAULT (no /agent toggle — Freebuff has
+# none: router.ts:480 "send to agent"), mode in footer, tool call renders,
+# shell runs directly (no gate) ---
 # 40 rows: the 6-step script (todos + read + edit + shell + final text
 # with heading/inline code/link) fits without scrolling out of view.
 start_tui 80 40
-send "/agent"
-send Enter
-sleep 1
-capture a1-agent-on
-check "$OUTDIR/a1-agent-on.plain.txt" "Agen koding AKTIF" "a1: /agent enables the agent"
-check "$OUTDIR/a1-agent-on.plain.txt" "Agent: Default" "a1: footer shows Agent: Default"
+capture a1-welcome
+check "$OUTDIR/a1-welcome.plain.txt" "Agent: Default" "a1: footer shows Agent: Default on the welcome screen (agent is default)"
 send "baca hello.txt dan jalankan echo"
 send Enter
 sleep 5
@@ -116,9 +114,6 @@ stop_tui
 # --- Scenario A2: /mode plan — shell tool is removed at the toolset level ---
 restart_mock
 start_tui 80 24
-send "/agent"
-send Enter
-sleep 1
 send "/mode plan"
 send Enter
 sleep 1

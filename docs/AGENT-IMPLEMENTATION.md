@@ -70,10 +70,13 @@
   (`$ <command>`, `Read <file>`, `Edit <file>`), hasil ringkas satu
   baris `✓`/`✗`, to-do live via `write_todos`, indikator Thinking
   tetap jalan + `Agent step N` di baris status.
-- **Perintah slash** — `/agent` (nyala/mati agen), `/mode [build|lite
-  |max|plan]`, `/init` (baca codebase → `AGENTS.md`, tidak menimpa
-  yang sudah ada), `/compact` (ringkas percakapan via model),
-  `/export` (tulis `metatech-export-*.md`).
+- **Perintah slash** — `/mode [default|lite|max|plan]`, `/init`
+  (baca codebase → `AGENTS.md`, tidak menimpa yang sudah ada),
+  `/compact` (ringkas percakapan via model), `/export` (tulis
+  `metatech-export-*.md`). TIDAK ADA `/agent` toggle: agen adalah
+  chat default (Freebuff `cli/src/commands/router.ts:480` "send to
+  agent" — setiap pesan biasa masuk agent step; `/agent` yang
+  diketik manual hanya mencetak status selalu-aktif).
 
 ## 3. File MethaTech yang diubah / dibuat
 
@@ -95,7 +98,7 @@ Diubah:
 | File | Perubahan |
 |---|---|
 | `src/api.ts` | `ChatMessage.role` + `"tool"`, + `name` / `tool_call_id` opsional (hasil tool) |
-| `src/ui/ChatApp.tsx` | State agen (`/agent`, `/mode`, `/init`, `/compact`, `/export`), `sendAgent`, pesan kind `tool`, mode di footer + `Agent step N`, `truncateMiddle` (anti-wrap di terminal kecil) |
+| `src/ui/ChatApp.tsx` | Agen adalah chat default (semua pesan non-slash lewat `send` → agent loop; tidak ada `send` chat polos lagi, tidak ada toggle `/agent`), state agen (`/mode`, `/init`, `/compact`, `/export`), pesan kind `tool`, mode di footer + `Agent step N`, `truncateMiddle` (anti-wrap di terminal kecil) |
 | `src/ui/layout.ts` | `LayoutMessage` kenal kind/role `tool`; render pesan tool (preview neon, hasil muted) |
 | `src/ui/palette.ts` | 5 perintah baru di palette (agent, mode, init, compact, export) |
 | `test/mock-server.mjs` | Mode `MOCK_AGENT=1`: skrip 3 respons (read_files → shell → task_completed), chunk 17 karakter |
@@ -428,29 +431,105 @@ Semua nilai di bawah dibaca LANGSUNG dari source Freebuff
    `justifyContent="space-between"` (shimmer kiri, timer + `■ Esc`
    kanan), menggantikan satu baris rata kiri.
 
+## 4e. Agen jadi DEFAULT (2026-11-09) — perbaikan atas komplain Reza di Termux
+
+**Latar:** Reza tes 0.1.6 di Termux ("cek project kita" di chat biasa)
+dan model menjawab "Saya tidak dapat melihat file..." — chat biasa
+tidak punya tools sama sekali. Akar masalah: agen hanya hidup di
+balik toggle `/agent`, chat biasa = `send()` polos tanpa system
+prompt. Di Freebuff pemisah itu TIDAK ADA.
+
+**Bukti dari source Freebuff (dibaca langsung, bukan README):**
+- `cli/src/chat.tsx:1031` `onSubmitPrompt(content, mode)` →
+  `routeUserPrompt({ agentMode: mode, sendMessage, ... })`.
+- `cli/src/commands/router.ts:258` `routeUserPrompt` → baris 480
+  komentar "Regular message or unknown slash command - send to
+  agent" → baris 555 `sendMessage({ content: trimmed, agentMode })`.
+- `cli/src/hooks/use-send-message.ts:315` `sendMessage` → baris 985
+  `client.run(runConfig)` (SDK run = agent loop). Tidak ada jalur
+  chat-tanpa-tools di rantai ini. Mode hanya memilih definisi agen
+  (`cli/src/utils/constants.ts:177-185` `AGENT_MODE_TO_ID`).
+- Spacing: `cli/src/components/message-block.tsx:275` gap 1 antar
+  blok konten; `cli/src/components/message-with-agents.tsx:215`
+  `paddingBottom: 1` antar pesan (kecuali terakhir).
+- Thinking: `cli/src/components/thinking.tsx` — header glyph
+  (`•` saat reasoning, `▾`/`▸` saat expand/collapse) + BOLD
+  "Thinking", preview 5 baris terakhir (`PREVIEW_LINE_COUNT = 5`),
+  italic muted, `paddingLeft: 2`.
+- System prompt: `agents/base3.ts` `createBase3` (~baris 128) —
+  `systemPrompt` (~baris 209) + `${PLACEHOLDER.
+  KNOWLEDGE_FILES_CONTENTS}` + `${PLACEHOLDER.GIT_CHANGES_PROMPT}`;
+  konteks proyek `packages/agent-runtime/src/system-prompt/
+  prompts.ts:86` `getProjectFileTreePrompt` (path proyek = cwd
+  untuk perintah terminal) + `:153` `getSystemInfoPrompt` + `:185`
+  `getGitChangesPrompt`.
+
+**Perubahan MethaTech:**
+- `src/ui/ChatApp.tsx`: fungsi `send()` chat polos DIHAPUS total
+  (4.161 byte — sumber bug); `sendAgent` jadi satu-satunya `send`.
+  Semua pesan non-slash lewat agent loop dengan system prompt agen
+  (definisi tools + tree proyek + cwd). `/agent` dihapus dari
+  palette; diketik manual hanya mencetak status selalu-aktif.
+  Footer selalu menampilkan `· Agent: Default`. Harga footer
+  disingkat jadi `FREE` (header sudah menampilkan `FREE $0.00`)
+  + cascade overflow (cwd → nama chat) supaya `Chat: New chat`
+  tidak terpotong jadi `New cha` di 80 kolom.
+- `src/agent/loop.ts`: event `reasoning` baru — reasoning dari
+  model diteruskan dari `streamChat.onReasoning` lewat `callModel`
+  ke TUI (sebelumnya Thinking tidak pernah sampai di mode agen).
+  Abort di tengah `callModel` dilaporkan sebagai `interrupted by
+  user`, bukan `model call failed`.
+- `src/ui/ChatApp.tsx` (lanjutan): event `reasoning` diakumulasi
+  ke field `thinking` pesan assistant (kartu Thinking); setelah
+  loop, bila dibatalkan tampil `Request dibatalkan.` (dulu hilang
+  ditelan loop — s16/s24).
+- `src/ui/layout.ts` `flattenMessages`: baris kosong setelah blok
+  Thinking sebelum jawaban (Freebuff `message-block.tsx:275`
+  gap 1); pesan assistant kosong tidak memancarkan baris (Freebuff
+  `single-block.tsx` teks kosong → null).
+- `src/ui/palette.ts`: `/agent` dihapus (12 perintah); deskripsi
+  `/mode` diperbaiki (`default/lite/max/plan`).
+- Tes: `test/palette.test.mjs` (12 perintah, tanpa `agent`),
+  `test/layout.test.mjs` (2 tes baru: blank setelah Thinking,
+  tanpa blank ganda bila jawaban kosong), `test/tui-pty.sh` s1
+  (footer `Agent: Default`) + s2 (palette tanpa `/agent`),
+  `test/agent-pty.sh` A1/A2 tanpa kirim `/agent` (A1 membuktikan
+  agen jalan by default).
+
+**Hasil tes (setelah perbaikan):** `npx tsc` bersih; `npm test`
+118/118; `bash test/agent-pty.sh` 27/27; `bash test/tui-pty.sh`
+128/128. Tes tmux manual "cek project kita" (mock agent, tanpa
+`/agent`): file `hello.txt` teredit, `agent-ran.txt` tercipta
+(shell jalan), preview tool + hasil tampil, XML tidak bocor.
+Screenshot: `docs/images/agent-default-welcome-small.png`,
+`agent-default-cek-proj-{small,desktop}.png`,
+`agent-default-thinking-{small,desktop}.png` — warna + spacing
+diverifikasi visual oleh GLM.
+
+**Catatan jujur:** s23 (`PgUp` dengan picker terbuka) lolos lewat
+nama chat di footer (`Chat: pesan 01`), bukan dari history yang
+terlihat — satu PgUp menggeser 11 baris (0.8 × viewport 14 baris
+saat picker terbuka) sementara history 8 pesan = 40 baris, jadi
+`pesan 01` tidak mungkin terlihat setelah satu PgUp. Scroll-nya
+sendiri benar (picker tetap terbuka, indikator `↑ 11 baris di
+atas` tampil); ekspektasi tes itu lemah, bukan perilaku produk
+yang salah.
+
 ## 5. Hasil build + test
 
 - `npx tsc` (strict): BERSIH.
-- `npm test`: **115/115 lolos** (107 sebelum audit scroll/Thinking/
-  Ctrl+C + 8 baru: easeOutCubic + scrollbarThumbRange, PgUp/PgDn
-  dengan picker terbuka, shimmer + formatElapsedTime (menggantikan
-  4 test sweep yang dihapus), Ctrl+C warning/exit + P3-sebelum-P4 +
-  Ctrl+C dengan picker/palette terbuka).
-- `bash test/tui-pty.sh`: **127/127 lolos** (skenario baru s23
-  PgUp/PgDn dengan picker terbuka di 80×40, s24 Ctrl+C: hapus draft
-  / interrupt stream / warning 2 detik / keluar; s6 ditulis ulang
-  jadi double-tap; s10 ditambah scrollbar + `↓ PgDn` + indikator
-  hanya bila scroll ke atas; s12 label `thinking...` lowercase +
-  `■ Esc` + tanpa `0s`; hint footer `Ctrl+C 2x keluar`).
-  Screenshot terverifikasi: `docs/images/tui-scroll-s10-{long,
-  pageup, pagedown}.png`, `tui-scroll-s12-thinking.png`,
-  `tui-scroll-s6-ctrlc-warning.png`,
-  `tui-scroll-s23-picker-pageup.png`.
-- `bash test/agent-pty.sh`: **28/28 lolos** (skrip mock 6 langkah:
-  write_todos → read_files → str_replace replacements →
-  write_todos centang → shell multi-baris → task_completed + teks
-  final heading/inline code/link/code block; A1 80×40 agar semua
-  langkah terlihat, A2 Plan, A3 /init + /export).
+- `npm test`: **118/118 lolos** (115 sebelum agent-as-default + 3
+  baru: palette 12 perintah tanpa `/agent`, blank setelah Thinking,
+  tanpa blank ganda bila jawaban kosong).
+- `bash test/tui-pty.sh`: **128/128 lolos** (127 sebelum
+  agent-as-default; s1 kini memeriksa footer `Agent: Default`, s2
+  memeriksa palette TIDAK berisi `/agent`; 6 kegagalan awal putaran
+  ini — s16/s24 interrupt tanpa `dibatalkan`, s19 footer `Chat:
+  New chat` terpotong, s20 Thinking tidak tampil di mode agen, s23
+  footer terpotong — semuanya diperbaiki dan hijau).
+- `bash test/agent-pty.sh`: **27/27 lolos** (28 sebelum
+  agent-as-default; A1/A2 kini tanpa kirim `/agent` — A1 membuktikan
+  agen jalan BY DEFAULT dari welcome screen).
   - Parser: chunk boundary per karakter, multi tool call, JSON rusak
     → parse error, tag tak tertutup → parse error.
   - Tool: baca/tulis/edit/grep/glob di direktori sementara, path

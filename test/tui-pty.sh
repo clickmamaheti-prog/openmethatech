@@ -100,24 +100,27 @@ send() { tmux send-keys -t "$SESSION" "$@" ; sleep 0.7; }
 stop_tui() { tmux send-keys -t "$SESSION" C-c; sleep 1; tmux kill-session -t "$SESSION" 2>/dev/null; }
 
 # --- Scenario 1: bare `methatech` opens the TUI (desktop 80x24) ---
+# The agent is the default chat (Freebuff: no plain-chat mode), so the
+# footer always shows the agent mode — no /agent toggle needed.
 start_tui 80 24
 capture s1-tui-open
 check "$OUTDIR/s1-tui-open.plain.txt" "MethaTech" "s1: header MethaTech renders"
 check "$OUTDIR/s1-tui-open.plain.txt" "glm-5.3-flash" "s1: active model shown"
 check "$OUTDIR/s1-tui-open.plain.txt" "Balance" "s1: balance shown"
+check "$OUTDIR/s1-tui-open.plain.txt" "Agent: Default" "s1: footer shows Agent: Default (agent is the default chat)"
 stop_tui
 
 # --- Scenario 2: command palette on "/" + filtering + Esc ---
 # NOTE: the palette shows a scrolling window of 8 rows (paletteMaxRowsFor
-# clamp), and there are now 13 commands — /exit sits below the fold on
+# clamp), and there are now 12 commands — /exit sits below the fold on
 # first open and only appears after paging Down to it. That is the
 # pre-existing window behaviour, not a regression.
 start_tui 80 24
 send "/"
 capture s2-palette-open
 check "$OUTDIR/s2-palette-open.plain.txt" "/model" "s2: palette lists /model"
-check "$OUTDIR/s2-palette-open.plain.txt" "/agent" "s2: palette lists /agent"
-for _ in $(seq 1 12); do tmux send-keys -t "$SESSION" Down; sleep 0.2; done
+check_absent "$OUTDIR/s2-palette-open.plain.txt" "/agent" "s2: palette does NOT list /agent (Freebuff has no agent toggle)"
+for _ in $(seq 1 11); do tmux send-keys -t "$SESSION" Down; sleep 0.2; done
 capture s2-palette-down
 check "$OUTDIR/s2-palette-down.plain.txt" "/exit" "s2: paging Down reveals /exit below the fold"
 send "mod"

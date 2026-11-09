@@ -85,8 +85,10 @@ Bukti spesifik (tes nyata, bukan asumsi — lihat laporan kompatibilitas):
 - **OpenTUI / `createCliRenderer` / alternate screen manual** — lihat
   bukti di atas. Ink JS murni dan sudah terbukti jalan di Termux Reza.
 - **Sub-agent tree, profile survey, @mention agents, file menu** —
-  tidak relevan untuk MethaTech (tidak ada agen coding di fase ini,
-  tidak ada file tree). Prioritas keyboard yang merujuk ke sana
+  tidak relevan untuk MethaTech (tidak ada sub-agent tree; agen
+  coding lokal SUDAH dibangun dan adalah chat default sejak perbaikan
+  agent-as-default — Freebuff `cli/src/commands/router.ts:480`
+  "send to agent"). Prioritas keyboard yang merujuk ke sana
   dipetakan ulang: Tab membuka model picker (bukan file menu),
   Ctrl+Q inert (tidak ada queue), Ctrl+T toggle Thinking (bukan
   toggle-all agent).
