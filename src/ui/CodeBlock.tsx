@@ -1,12 +1,12 @@
-// Code block renderer with MethaTech syntax highlighting.
-// Used by the chat TUI for ``` fenced blocks in assistant messages, and
-// reused by the future coding-agent code viewer. Background stays black;
-// every token color comes from the centralized theme.
+// Code block renderer — Freebuff style (markdown-renderer.tsx):
+// MONOCHROME body (codeTextFg #f1f5f9 on codeBackground #374151),
+// header "// lang" in codeHeaderFg (#5b647a). No per-token colors.
+// Kept for surfaces that show code outside chat; chat code blocks
+// render through layout.ts flattenMessages with the same palette.
 
 import React from "react";
 import { Box, Text } from "ink";
-import { syntax, theme } from "../theme.js";
-import { tokenizeCode } from "./syntax.js";
+import { markdown } from "../theme.js";
 
 interface CodeBlockProps {
   code: string;
@@ -14,22 +14,14 @@ interface CodeBlockProps {
 }
 
 export default function CodeBlock({ code, lang }: CodeBlockProps) {
-  const lines = tokenizeCode(code);
+  const rawLines = code.split("\n");
+  if (rawLines.length > 0 && rawLines[rawLines.length - 1] === "") rawLines.pop();
   return (
     <Box flexDirection="column" marginY={0}>
-      {lang ? (
-        <Text color={theme.muted}>
-          {lang}
-        </Text>
-      ) : null}
-      {lines.map((tokens, i) => (
-        <Text key={i}>
-          {tokens.map((t, j) => (
-            <Text key={j} color={syntax[t.kind]}>
-              {t.text}
-            </Text>
-          ))}
-          {tokens.length === 0 ? " " : null}
+      {lang ? <Text color={markdown.codeHeaderFg}>{`// ${lang}`}</Text> : null}
+      {rawLines.map((line, i) => (
+        <Text key={i} color={markdown.codeTextFg} backgroundColor={markdown.codeBackground}>
+          {line === "" ? " " : line}
         </Text>
       ))}
     </Box>

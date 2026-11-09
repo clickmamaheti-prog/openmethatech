@@ -80,3 +80,16 @@ test("visibleWindow: window never exceeds the list, small lists fit whole", () =
   assert.deepEqual(visibleWindow(0, 0, 10), { start: 0, end: 0 });
   assert.deepEqual(visibleWindow(10, 0, 0), { start: 0, end: 0 });
 });
+
+test("isLocked: paid model locks at exactly $0, never on unknown balance", async () => {
+  const { isLocked, lockedExplanation } = await import("../dist/ui/picker.js");
+  const paid = { id: "pro", ownedBy: "", price: { input: 5, output: 25 }, free: false };
+  const free = { id: "glm-5.3-flash", ownedBy: "", price: null, free: true };
+  assert.equal(isLocked(paid, 0), true);
+  assert.equal(isLocked(paid, 0.0), true);
+  assert.equal(isLocked(paid, 0.5), false);
+  assert.equal(isLocked(paid, null), false);
+  assert.equal(isLocked(free, 0), false);
+  assert.ok(lockedExplanation(paid).includes("pro"));
+  assert.ok(lockedExplanation(paid).includes("$0.00"));
+});

@@ -10,21 +10,21 @@ import {
   paletteClampIndex,
 } from "../dist/ui/palette.js";
 
-test("COMMANDS lists exactly the 8 supported commands", () => {
+test("COMMANDS lists exactly the 13 supported commands", () => {
   assert.deepEqual(
     COMMANDS.map((c) => c.name),
-    ["model", "models", "clear", "help", "account", "keys", "topup", "exit"],
+    ["model", "models", "agent", "mode", "init", "compact", "export", "clear", "help", "account", "keys", "topup", "exit"],
   );
 });
 
 test("filterCommands: empty query returns the full list", () => {
-  assert.equal(filterCommands("").length, 8);
-  assert.equal(filterCommands("   ").length, 8);
+  assert.equal(filterCommands("").length, 13);
+  assert.equal(filterCommands("   ").length, 13);
 });
 
 test("filterCommands: prefix match", () => {
-  assert.deepEqual(filterCommands("mod").map((c) => c.name), ["model", "models"]);
-  assert.deepEqual(filterCommands("c").map((c) => c.name), ["clear", "account"]);
+  assert.deepEqual(filterCommands("mod").map((c) => c.name), ["model", "models", "mode"]);
+  assert.deepEqual(filterCommands("c").map((c) => c.name), ["compact", "clear", "account", "init", "export"]);
 });
 
 test("filterCommands: substring + case-insensitive", () => {

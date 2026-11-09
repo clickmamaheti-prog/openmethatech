@@ -13,7 +13,32 @@ export { default as CommandPalette } from "./CommandPalette.js";
 export { default as ModelPicker } from "./ModelPicker.js";
 export { COMMANDS, filterCommands, paletteNextIndex, palettePrevIndex, paletteClampIndex } from "./palette.js";
 export type { PaletteCommand } from "./palette.js";
-export { groupCatalog, flattenGroups, pickerNext, pickerPrev, visibleWindow } from "./picker.js";
+export { groupCatalog, flattenGroups, pickerNext, pickerPrev, visibleWindow, isLocked, lockedExplanation } from "./picker.js";
 export type { PickerGroup, VisibleWindow } from "./picker.js";
-export { THINKING_LABEL, SWEEP_WIDTH, nextSweepIndex, sweepSegments, shouldShowThinking } from "./thinking.js";
-export type { SweepSegment } from "./thinking.js";
+export {
+  THINKING_LABEL,
+  WAITING_LABEL,
+  WORKING_LABEL,
+  SHIMMER_INTERVAL_MS,
+  PREVIEW_LINE_COUNT,
+  formatElapsedTime,
+  generateShimmerPalette,
+  shimmerSegments,
+  shouldShowThinking,
+  phaseLabel,
+  getLastNVisualLines,
+  thinkingPreview,
+  toggleThinkingState,
+} from "./thinking.js";
+export type { ShimmerSegment, ThinkingPhase, ThinkingCollapseState, ThinkingPreview } from "./thinking.js";
+export { EXIT_WARNING_TIMEOUT_MS, resolveKeyboardAction, createDefaultKeyboardState } from "./keyboard.js";
+export type { KeyboardAction, KeyboardState, ResolverKey } from "./keyboard.js";
+export {
+  parseSlashContext,
+  filterSlashCommands,
+  fuzzyMatch,
+  suggestionWindow,
+  suggestionMaxVisible,
+  highlightIndices,
+} from "./suggestions.js";
+export type { SuggestionItem } from "./suggestions.js";

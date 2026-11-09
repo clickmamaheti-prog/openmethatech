@@ -1,31 +1,37 @@
-// Thinking indicator: "Thinking..." in green with a bright sweep of light
-// travelling left to right, repeating while the AI processes a request.
-// Lightweight: one setInterval (~100ms) that only advances the sweep
-// position. The parent renders this only while shouldShowThinking() is
-// true, so it never appears when no request is active, once streaming
-// starts, on finish, or on error.
+// Status shimmer — Freebuff `cli/src/components/shimmer-text.tsx`
+// (ShimmerText) + `cli/src/components/status-bar.tsx`: while waiting
+// the label is lowercase "thinking...", while streaming "working...",
+// rendered as a per-character color sweep generated from
+// theme.secondary (180ms pulse, bright band travels left to right,
+// first 23% BOLD, last 31% DIM). The parent renders this only while
+// a request is active, so it never appears when idle, once the
+// request finishes, or on error.
 
 import React, { useEffect, useState } from "react";
 import { Text } from "ink";
 import { theme } from "../theme.js";
-import { THINKING_LABEL, nextSweepIndex, sweepSegments } from "./thinking.js";
+import {
+  SHIMMER_INTERVAL_MS,
+  THINKING_LABEL,
+  shimmerSegments,
+} from "./thinking.js";
 
-export default function Thinking() {
-  const [sweep, setSweep] = useState(0);
+export default function Thinking({ label = THINKING_LABEL }: { label?: string } = {}) {
+  const [pulse, setPulse] = useState(0);
 
   useEffect(() => {
     const id = setInterval(() => {
-      setSweep((s) => nextSweepIndex(s, THINKING_LABEL.length));
-    }, 100);
+      setPulse((p) => (p + 1) % Math.max(1, label.length));
+    }, SHIMMER_INTERVAL_MS);
     return () => clearInterval(id);
-  }, []);
+  }, [label]);
 
-  const segments = sweepSegments(THINKING_LABEL, sweep);
+  const segments = shimmerSegments(label, pulse, theme.secondary, theme.muted);
 
   return (
     <Text>
       {segments.map((seg, i) => (
-        <Text key={i} color={seg.bright ? theme.accent : theme.muted} bold={seg.bright}>
+        <Text key={i} color={seg.color} bold={seg.bold} dimColor={seg.dim}>
           {seg.text}
         </Text>
       ))}

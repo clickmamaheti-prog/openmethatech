@@ -1,34 +1,57 @@
 // Command palette logic — pure, no Ink/React. Unit-testable in isolation.
 // The component (CommandPalette.tsx) only renders what these functions
 // return; all filtering and navigation lives here.
+//
+// Filtering is Freebuff's priority slash filter (use-suggestion-engine.ts
+// filterSlashCommands, via suggestions.ts): prefix of name/alias, then
+// substring of name/alias, then substring of description — deduped, in
+// that order. Empty query returns the full list.
+
+import { filterSlashCommands, type SuggestionItem } from "./suggestions.js";
 
 export interface PaletteCommand {
   name: string;
   desc: string;
+  aliases?: string[];
 }
 
 export const COMMANDS: readonly PaletteCommand[] = [
   { name: "model", desc: "pilih model (atau /model <id> langsung)" },
   { name: "models", desc: "lihat daftar model" },
+  { name: "agent", desc: "nyalakan/matikan agen koding" },
+  { name: "mode", desc: "ganti mode agen (build/lite/max/plan)" },
+  { name: "init", desc: "baca codebase, buat AGENTS.md" },
+  { name: "compact", desc: "ringkas percakapan" },
+  { name: "export", desc: "ekspor percakapan ke file Markdown" },
   { name: "clear", desc: "bersihkan layar chat" },
   { name: "help", desc: "bantuan" },
   { name: "account", desc: "ringkasan akun" },
   { name: "keys", desc: "info API key" },
   { name: "topup", desc: "buka halaman top up" },
-  { name: "exit", desc: "keluar" },
+  { name: "exit", desc: "keluar", aliases: ["quit"] },
 ];
+
+function toSuggestionItems(): SuggestionItem[] {
+  return COMMANDS.map((c) => ({
+    id: c.name,
+    label: c.name,
+    description: c.desc,
+    aliases: c.aliases,
+  }));
+}
 
 /**
  * Filter commands in real time as the user types after "/".
- * Prefix and substring matches, case-insensitive, over name and desc.
- * Empty query returns the full list.
+ * Priority: prefix of name/alias → substring of name/alias →
+ * substring of description. Empty query returns the full list.
  */
 export function filterCommands(query: string): PaletteCommand[] {
   const q = query.trim().toLowerCase();
   if (q === "") return [...COMMANDS];
-  return COMMANDS.filter(
-    (c) => c.name.toLowerCase().includes(q) || c.desc.toLowerCase().includes(q),
-  );
+  return filterSlashCommands(toSuggestionItems(), q).map((s) => {
+    const cmd = COMMANDS.find((c) => c.name === s.id) as PaletteCommand;
+    return cmd;
+  });
 }
 
 /** Next selection, wrapping around. Returns -1 when the list is empty. */

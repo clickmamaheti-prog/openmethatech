@@ -280,11 +280,21 @@ async function cmdChat(modelOpt?: string, opts?: { clearScreen?: boolean }): Pro
   const model = known ? requested : FALLBACK_MODEL;
   if (!known) console.log(`Model ${requested} tidak dikenal, memakai ${FALLBACK_MODEL}.`);
   const balance = await balanceOf(apiKey);
-  // Fresh screen when coming straight from login, so no login output is
-  // left stacked above the TUI. Ink then owns the screen from the top.
-  if (opts?.clearScreen) process.stdout.write("\x1b[2J\x1b[H");
+  // Always start on a fresh screen, so no shell prompt, login output or
+  // previous command is left stacked above the TUI. Ink then owns the
+  // screen from the top row. (Was conditional on coming from login only,
+  // which left `$ methatech` visible above the header on a plain start.)
+  process.stdout.write("\x1b[2J\x1b[H");
   const app = render(
-    React.createElement(ChatApp, { apiKey, initialModel: model, catalog, balanceUsd: balance })
+    React.createElement(ChatApp, { apiKey, initialModel: model, catalog, balanceUsd: balance }),
+    // exitOnCtrlC: false — Ctrl+C MUST reach ChatApp's own priority
+    // resolver (Freebuff double-tap: clear draft / interrupt / warn /
+    // exit). With Ink's default (true), Ink exits on the first \x03
+    // and never delivers it to useInput, so every Ctrl+C branch in
+    // the resolver was dead code in the real TUI until 2026-11-09.
+    // The one-shot screens (models/account) keep the default: Ctrl+C
+    // quits them.
+    { exitOnCtrlC: false },
   );
   await app.waitUntilExit();
 }

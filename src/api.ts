@@ -145,8 +145,12 @@ export async function pollDeviceToken(deviceCode: string): Promise<DeviceTokenRe
 }
 
 export interface ChatMessage {
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "system" | "tool";
   content: string;
+  /** Tool messages only: which tool produced this result. */
+  name?: string;
+  /** Tool messages only: id of the tool call (OpenAI-compatible). */
+  tool_call_id?: string;
 }
 
 export interface ChatUsage {
@@ -218,6 +222,13 @@ export async function getTotalUsageCents(apiKey: string): Promise<number> {
 export interface StreamHandlers {
   onDelta: (text: string) => void;
   onUsage: (usage: ChatUsage) => void;
+  /** Reasoning deltas (delta.reasoning_content), when the server sends them. */
+  onReasoning?: (text: string) => void;
+}
+
+export interface StreamOptions {
+  /** Abort the request (Esc / Ctrl+C interrupt). Combined with the 120s timeout. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -229,8 +240,11 @@ export async function streamChat(
   model: string,
   messages: ChatMessage[],
   handlers: StreamHandlers,
-  maxTokens = 1024
+  maxTokens = 1024,
+  opts: StreamOptions = {},
 ): Promise<{ usage: ChatUsage | null }> {
+  const signals = [AbortSignal.timeout(120000)];
+  if (opts.signal) signals.push(opts.signal);
   const res = await fetch(`${apiBase()}/v1/chat/completions`, {
     method: "POST",
     headers: {
@@ -244,7 +258,7 @@ export async function streamChat(
       stream: true,
       stream_options: { include_usage: true },
     }),
-    signal: AbortSignal.timeout(120000),
+    signal: AbortSignal.any(signals),
   });
   if (!res.ok) throw friendlyError(res.status, await res.text());
   if (!res.body) throw new ApiError(0, "Tidak ada body stream dari server");
@@ -260,11 +274,16 @@ export async function streamChat(
     if (payload === "[DONE]") return;
     try {
       const chunk = JSON.parse(payload) as {
-        choices?: { delta?: { content?: string }; finish_reason?: string | null }[];
+        choices?: {
+          delta?: { content?: string; reasoning_content?: string };
+          finish_reason?: string | null;
+        }[];
         usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null;
       };
       const delta = chunk.choices?.[0]?.delta?.content;
       if (typeof delta === "string" && delta.length > 0) handlers.onDelta(delta);
+      const reasoning = chunk.choices?.[0]?.delta?.reasoning_content;
+      if (typeof reasoning === "string" && reasoning.length > 0) handlers.onReasoning?.(reasoning);
       if (chunk.usage && typeof chunk.usage.prompt_tokens === "number") {
         usage = {
           promptTokens: chunk.usage.prompt_tokens,

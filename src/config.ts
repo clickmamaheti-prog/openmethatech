@@ -19,6 +19,10 @@ export interface Credentials {
   /** Model picked last time, so `methatech chat` resumes with it. */
   defaultModel?: string;
   savedAt?: string;
+  /** True once the user has sent their first prompt (starter prompts
+      in the welcome state disappear permanently after that — Freebuff
+      hasSubmittedFirstPrompt / markFirstPromptSubmitted). */
+  firstPromptSubmitted?: boolean;
 }
 
 export function readCredentials(): Credentials | null {
@@ -75,6 +79,19 @@ export function saveDefaultModel(model: string): void {
   const creds = readCredentials();
   if (!creds) return;
   writeCredentials({ ...creds, defaultModel: model });
+}
+
+/** True once the user has sent their first prompt (persisted). */
+export function hasSubmittedFirstPrompt(): boolean {
+  return readCredentials()?.firstPromptSubmitted === true;
+}
+
+/** Mark the first prompt as sent, so starter prompts never return. */
+export function markFirstPromptSubmitted(): void {
+  const creds = readCredentials();
+  if (!creds) return;
+  if (creds.firstPromptSubmitted) return;
+  writeCredentials({ ...creds, firstPromptSubmitted: true });
 }
 
 export function apiBase(): string {

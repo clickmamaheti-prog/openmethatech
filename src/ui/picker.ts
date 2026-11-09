@@ -54,6 +54,28 @@ export interface VisibleWindow {
 }
 
 /**
+ * A paid model is LOCKED while the balance is exactly $0 (Freebuff
+ * model selector: paid rows without a plan are LOCKED; the first Enter
+ * explains, the second opens the plans page). `balanceUsd === null`
+ * means unknown — never lock on an unknown balance. Free models are
+ * never locked.
+ */
+export function isLocked(entry: CatalogEntry, balanceUsd: number | null): boolean {
+  return !entry.free && balanceUsd !== null && balanceUsd <= 0;
+}
+
+/** Explanation shown on the first Enter on a LOCKED row. */
+export function lockedExplanation(entry: CatalogEntry): string {
+  const price = entry.price
+    ? `$${entry.price.input.toFixed(2)} / $${entry.price.output.toFixed(2)} per 1M`
+    : "paid model";
+  return (
+    `${entry.id} is a paid model (${price}) and your balance is $0.00. ` +
+    `Top up first to use it — press Enter again to open the top-up page, or Esc to pick another model.`
+  );
+}
+
+/**
  * Scrolling window so the selected row is always visible.
  * Window size is min(maxRows, total). Stateless page anchoring: the
  * window only moves when the selection crosses a page boundary, so the

@@ -6,6 +6,8 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { theme } from "../theme.js";
+import { suggestionWindow } from "./suggestions.js";
+import { paletteHint } from "./layout.js";
 import type { PaletteCommand } from "./palette.js";
 
 interface CommandPaletteProps {
@@ -13,6 +15,8 @@ interface CommandPaletteProps {
   selectedIndex: number;
   /** Max row width in columns (from useStdout, already minus padding). */
   maxWidth: number;
+  /** Max command rows shown at once (dynamic budget from ChatApp). */
+  maxRows?: number;
 }
 
 function truncate(s: string, max: number): string {
@@ -20,7 +24,7 @@ function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, Math.max(0, max - 1)) + "…" : s;
 }
 
-export default function CommandPalette({ commands, selectedIndex, maxWidth }: CommandPaletteProps) {
+export default function CommandPalette({ commands, selectedIndex, maxWidth, maxRows }: CommandPaletteProps) {
   if (commands.length === 0) {
     return (
       <Box flexDirection="column">
@@ -28,10 +32,18 @@ export default function CommandPalette({ commands, selectedIndex, maxWidth }: Co
       </Box>
     );
   }
+  // Long filtered lists scroll with Freebuff's centered
+  // suggestionWindow: the selected row stays in the middle of the
+  // visible slice, so the palette can never push the input out of
+  // the viewport on a short terminal.
+  const { start, visibleCount } = suggestionWindow(commands.length, selectedIndex, maxRows ?? commands.length);
+  const end = start + visibleCount;
+  const visible = commands.slice(start, end);
   return (
     <Box flexDirection="column">
-      {commands.map((cmd, i) => {
-        const selected = i === selectedIndex;
+      {visible.map((cmd, i) => {
+        const idx = start + i;
+        const selected = idx === selectedIndex;
         const line = `/${cmd.name} — ${cmd.desc}`;
         if (selected) {
           return (
@@ -48,7 +60,7 @@ export default function CommandPalette({ commands, selectedIndex, maxWidth }: Co
           </Text>
         );
       })}
-      <Text color={theme.muted}>↑↓ pilih · Enter jalankan · Esc tutup</Text>
+      <Text color={theme.muted}>{paletteHint(maxWidth)}</Text>
     </Box>
   );
 }

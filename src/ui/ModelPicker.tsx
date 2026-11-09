@@ -2,13 +2,22 @@
 // own: the single useInput handler in ChatApp owns Up/Down/Enter/Esc and
 // passes the selection down here. Groups come from the live catalog via
 // groupCatalog(); FREE first, PAID sorted cheapest-first. Paid models are
-// shown with their price, never hidden. Long lists scroll: only the
-// visibleWindow() slice around the selection is rendered.
+// shown with their price, never hidden.
+//
+// Freebuff model selector (freebuff-model-selector.tsx): rows are
+// LOCKED for paid models without a plan, the selected row shows its
+// detail on a second line, and the list scrolls to keep the focused
+// row visible. MethaTech adaptation: a paid row is LOCKED only while
+// the balance is exactly $0 (balance null = unknown, never locked);
+// the selected row gets the 2nd detail line, other rows stay 1 line
+// so short terminals still fit many models (pickerRenderedRows in
+// layout.ts counts the extra line).
 
 import React from "react";
 import { Box, Text } from "ink";
 import { theme } from "../theme.js";
-import { flattenGroups, groupCatalog, visibleWindow, type PickerGroup } from "./picker.js";
+import { flattenGroups, groupCatalog, isLocked, visibleWindow, type PickerGroup } from "./picker.js";
+import { pickerHint } from "./layout.js";
 import type { Catalog } from "../models.js";
 
 interface ModelPickerProps {
@@ -20,6 +29,8 @@ interface ModelPickerProps {
   maxRows: number;
   /** Max row width in columns (from useStdout, already minus padding). */
   maxWidth: number;
+  /** Balance in dollars (null when unknown). Paid rows lock at $0. */
+  balanceUsd?: number | null;
 }
 
 function truncate(s: string, max: number): string {
@@ -33,7 +44,7 @@ function priceLabel(group: PickerGroup, id: string, price: { input: number; outp
   return `$${price.input.toFixed(2)} / $${price.output.toFixed(2)} per 1M`;
 }
 
-export default function ModelPicker({ catalog, selectedIndex, activeModel, maxRows, maxWidth }: ModelPickerProps) {
+export default function ModelPicker({ catalog, selectedIndex, activeModel, maxRows, maxWidth, balanceUsd }: ModelPickerProps) {
   const groups = groupCatalog(catalog);
   const flat = flattenGroups(groups);
   const total = flat.length;
@@ -74,8 +85,16 @@ export default function ModelPicker({ catalog, selectedIndex, activeModel, maxRo
     }
     const selected = flatIdx === selectedIndex;
     const active = entry.id === activeModel;
+    const locked = isLocked(entry, balanceUsd ?? null);
     const marker = active ? "▸ " : "  ";
-    const line = `${marker}${entry.id}  ·  ${priceLabel(group, entry.id, entry.price)}`;
+    const line = `${marker}${entry.id}  ·  ${priceLabel(group, entry.id, entry.price)}${locked ? "  ·  LOCKED" : ""}`;
+    const detail = [
+      entry.ownedBy ? entry.ownedBy : null,
+      priceLabel(group, entry.id, entry.price),
+      locked ? "LOCKED — top up to unlock (Enter for details)" : active ? "active model" : null,
+    ]
+      .filter((p): p is string => p !== null)
+      .join(" · ");
     if (selected) {
       rows.push(
         <Box key={entry.id} backgroundColor={theme.accent}>
@@ -84,9 +103,18 @@ export default function ModelPicker({ catalog, selectedIndex, activeModel, maxRo
           </Text>
         </Box>,
       );
+      rows.push(
+        <Text key={`${entry.id}-detail`} color={theme.muted}>
+          {truncate(`   ${detail}`, maxWidth)}
+        </Text>,
+      );
     } else {
       rows.push(
-        <Text key={entry.id} color={active ? theme.accent : theme.text} bold={active}>
+        <Text
+          key={entry.id}
+          color={locked ? theme.warning : active ? theme.accent : theme.text}
+          bold={active}
+        >
           {truncate(line, maxWidth)}
         </Text>,
       );
@@ -100,7 +128,7 @@ export default function ModelPicker({ catalog, selectedIndex, activeModel, maxRo
       </Text>
       {rows}
       {end < total ? <Text color={theme.muted}>↓ {total - end} lagi</Text> : null}
-      <Text color={theme.muted}>↑↓ pilih · Enter pakai · Esc batal · ▸ = model aktif</Text>
+      <Text color={theme.muted}>{pickerHint(maxWidth)}</Text>
     </Box>
   );
 }

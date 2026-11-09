@@ -6,6 +6,7 @@
 import http from "node:http";
 
 const PORT = Number(process.env.MOCK_PORT ?? process.argv[2] ?? 18099);
+let agentReq = 0;
 
 const CATALOG = {
   "deepseek-v4-flash": { owned_by: "DeepSeek", price: { input: 0.25, output: 1.0 } },
@@ -50,14 +51,48 @@ const server = http.createServer((req, res) => {
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
     });
-    const chunks = [
-      { choices: [{ delta: { content: "Halo! " } }] },
-      { choices: [{ delta: { content: "Ini balasan mock." } }] },
-      {
+    // MOCK_AGENT=1: scripted agent run (one full response per request,
+    // split into small chunks so the XML parser is exercised mid-stream):
+    // 1st request: write_todos (Freebuff shape {task, completed}) ·
+    // 2nd: read_files hello.txt · 3rd: str_replace with a replacements
+    // array · 4th: write_todos again, first two completed · 5th: run a
+    // multi-line shell command (runs directly, no confirmation gate —
+    // like Freebuff) · 6th: task_completed + final text with a heading,
+    // inline code and a link (Freebuff markdown palette).
+    // Later requests: plain final text.
+    let chunks;
+    if (process.env.MOCK_AGENT) {
+      agentReq += 1;
+      const texts = [
+        `Buat daftar tugas dulu.\n<codebuff_tool_call>\n{"cb_tool_name": "write_todos", "todos": [{"task": "Baca hello.txt", "completed": false}, {"task": "Edit hello.txt", "completed": false}, {"task": "Jalankan perintah", "completed": false}]}\n</codebuff_tool_call>`,
+        `Membaca file dulu.\n<codebuff_tool_call>\n{"cb_tool_name": "read_files", "paths": ["hello.txt"]}\n</codebuff_tool_call>`,
+        `Edit file.\n<codebuff_tool_call>\n{"cb_tool_name": "str_replace", "path": "hello.txt", "replacements": [{"oldString": "isi hello untuk agen", "newString": "isi hello sudah diedit agen"}]}\n</codebuff_tool_call>`,
+        `Tandai yang sudah selesai.\n<codebuff_tool_call>\n{"cb_tool_name": "write_todos", "todos": [{"task": "Baca hello.txt", "completed": true}, {"task": "Edit hello.txt", "completed": true}, {"task": "Jalankan perintah", "completed": false}]}\n</codebuff_tool_call>`,
+        `Sekarang jalankan perintah.\n<codebuff_tool_call>\n{"cb_tool_name": "run_terminal_command", "command": "touch agent-ran.txt && echo line1 && echo line2 && echo line3 && echo line4 && echo hello-agent"}\n</codebuff_tool_call>`,
+        `<codebuff_tool_call>\n{"cb_tool_name": "task_completed", "summary": "selesai"}\n</codebuff_tool_call>\n# Selesai\nFile \`hello.txt\` sudah diedit. Jalankan \`npm test\` untuk verifikasi. Lihat [docs](https://example.com) bila perlu.\n\`\`\`sh\nnpm test\n\`\`\``,
+      ];
+      const full = texts[Math.min(agentReq - 1, texts.length - 1)];
+      chunks = [];
+      for (let i = 0; i < full.length; i += 17) {
+        chunks.push({ choices: [{ delta: { content: full.slice(i, i + 17) } }] });
+      }
+      chunks.push({
         choices: [{ delta: {}, finish_reason: "stop" }],
         usage: { prompt_tokens: 10, completion_tokens: 8, total_tokens: 18 },
-      },
-    ];
+      });
+    } else {
+      chunks = [
+        ...(process.env.MOCK_REASONING
+          ? [{ choices: [{ delta: { reasoning_content: "mock reasoning here" } }] }]
+          : []),
+        { choices: [{ delta: { content: "Halo! " } }] },
+        { choices: [{ delta: { content: "Ini balasan mock." } }] },
+        {
+          choices: [{ delta: {}, finish_reason: "stop" }],
+          usage: { prompt_tokens: 10, completion_tokens: 8, total_tokens: 18 },
+        },
+      ];
+    }
     const firstDelay = Number(process.env.MOCK_SSE_FIRST_DELAY_MS ?? 60);
     let i = 0;
     const sendNext = () => {
