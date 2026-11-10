@@ -55,6 +55,12 @@ restart_mock() {
   MOCK_PID=$!
   sleep 1
 }
+restart_mock_codex() {
+  kill $MOCK_PID 2>/dev/null
+  MOCK_CODEX=1 node test/mock-server.mjs "$MOCK_PORT" > "$OUTDIR/mock-server.log" 2>&1 &
+  MOCK_PID=$!
+  sleep 1
+}
 start_tui() { # start_tui <cols> <rows>
   local cols="$1" rows="$2"
   tmux kill-session -t "$SESSION" 2>/dev/null
@@ -84,7 +90,7 @@ capture a1-toolcall
 check "$OUTDIR/a1-toolcall.plain.txt" "TODOs" "a1: to-do list header renders (Freebuff write-todos)"
 check "$OUTDIR/a1-toolcall.plain.txt" "Baca hello.txt" "a1: to-do item renders"
 check "$OUTDIR/a1-toolcall.plain.txt" "Read hello.txt" "a1: read_files tool preview renders"
-check "$OUTDIR/a1-toolcall.plain.txt" "isi hello untuk agen" "a1: tool result (file content) renders"
+check_absent "$OUTDIR/a1-toolcall.plain.txt" "isi hello untuk agen" "a1: tool result content stays off screen (tool-wall §4m: read shows path only)"
 check "$OUTDIR/a1-toolcall.plain.txt" "Edit hello.txt" "a1: str_replace tool preview renders"
 check "$OUTDIR/a1-toolcall.plain.txt" "touch agent-ran.txt" "a1: shell tool preview renders"
 check "$OUTDIR/a1-toolcall.plain.txt" "hello-agent" "a1: shell ran directly, no confirmation box"
@@ -153,6 +159,24 @@ if ls "$PROJ"/metatech-export-*.md >/dev/null 2>&1; then
 else
   echo "FAIL: a3: export file missing in the project folder"; FAIL=$((FAIL+1))
 fi
+stop_tui
+
+# --- Scenario A4: live bug 2026-11-09 (Reza Termux, glm-5.3-flash) ---
+# The model emits <codex_tool_call> for list_directory, then promises
+# tool use with NO call ("saya cek proyeknya sekarang"). The agent must
+# run List (alias), get nudged after the promise-only step, run List
+# again (canonical), and finish with task_completed — never silent.
+restart_mock_codex
+start_tui 80 24
+send "cek projeck kita"
+send Enter
+sleep 8
+capture a4-codex
+check "$OUTDIR/a4-codex.plain.txt" "List ." "a4: codex alias list_directory preview renders (tool ran)"
+check "$OUTDIR/a4-codex.plain.txt" "hello.txt" "a4: list result shows project files"
+check_absent "$OUTDIR/a4-codex.plain.txt" "codex_tool_call" "a4: codex XML never leaks into chat"
+check_absent "$OUTDIR/a4-codex.plain.txt" "codebuff_tool_call" "a4: canonical XML never leaks into chat"
+check "$OUTDIR/a4-codex.plain.txt" "Selesai" "a4: task completed, final heading renders"
 stop_tui
 
 echo ""

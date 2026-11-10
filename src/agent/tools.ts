@@ -26,9 +26,15 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
 import { discoverSkills, formatAvailableSkillsXml, loadSkill } from "./skills.js";
 import { sanitizeTerminalText } from "../ui/terminal-safe.js";
+import {
+  resolveInsideSecure,
+  scrubShellEnv,
+  validateShellCommand,
+  type Redactor,
+} from "./security.js";
+import { runShellCommand } from "./shell-sandbox.js";
 
 export const TOOL_OUTPUT_LIMIT = 50_000;
 export const MAX_TERMINAL_TIMEOUT_SECONDS = 600;
@@ -67,7 +73,13 @@ function reqStringArray(input: Record<string, unknown>, key: string): Valid<stri
 // Path sandbox
 // ---------------------------------------------------------------------------
 
-/** Resolve `p` inside `cwd`; null when it escapes the project folder. */
+/**
+ * Lexical path containment ONLY: it does not resolve symlinks, so a
+ * symlink inside the workspace that points outside passes this check.
+ * Fase 8: all tool handlers use `resolveInsideSecure` (security.ts)
+ * instead — realpath-enforced containment. This function stays
+ * exported for the security module's own use and for tests.
+ */
 export function resolveInside(cwd: string, p: string): string | null {
   const abs = path.isAbsolute(p) ? path.normalize(p) : path.normalize(path.join(cwd, p));
   const root = path.normalize(cwd);
@@ -107,6 +119,11 @@ export interface ToolContext {
   /** Tool names available in the current mode (for the write_todos
       no-file-edit-tools note in Plan mode). */
   toolNames?: string[];
+  /** Fase 8: redact secrets from tool output before it reaches the
+      model. Set by the agent loop from the session API key; when
+      absent, no redaction happens at this level (the orchestrator
+      still redacts when it has a redactor). */
+  redact?: Redactor;
 }
 
 export interface ToolResult {
@@ -115,6 +132,10 @@ export interface ToolResult {
   output: string;
   /** ask_user: the turn must pause for the user's answers. */
   askUserQuestions?: { question: string; options?: string[] }[];
+  /** Fase 8: how run_terminal_command actually ran — a Linux user+mount
+      namespace ("namespace") or validation + env scrubbing only
+      ("validation-only", on platforms without user namespaces). */
+  sandbox?: "namespace" | "validation-only";
 }
 
 function okResult(output: string): ToolResult {
@@ -154,7 +175,7 @@ function readFilesTool(): ToolDefinition {
       const endLine = optNumber(input, "end_line", 0);
       const out: string[] = [];
       for (const p of paths.value) {
-        const abs = resolveInside(ctx.cwd, p);
+        const abs = resolveInsideSecure(ctx.cwd, p);
         if (!abs) return errResult(`read_files: path outside the project folder: ${p}`);
         let raw: string;
         try {
@@ -182,7 +203,7 @@ function listDirectoryTool(): ToolDefinition {
       "List a directory. Params: {path?: string (default: project root)}. Returns entries with a trailing / for directories.",
     execute: async (ctx, input) => {
       const rel = optString(input, "path", ".") ?? ".";
-      const abs = resolveInside(ctx.cwd, rel);
+      const abs = resolveInsideSecure(ctx.cwd, rel);
       if (!abs) return errResult(`list_directory: path outside the project folder: ${rel}`);
       try {
         const entries = fs.readdirSync(abs, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
@@ -265,7 +286,7 @@ function codeSearchTool(): ToolDefinition {
       const pattern = reqString(input, "pattern");
       if (!pattern.ok) return errResult(pattern.error);
       const rel = optString(input, "path", ".") ?? ".";
-      const start = resolveInside(ctx.cwd, rel);
+      const start = resolveInsideSecure(ctx.cwd, rel);
       if (!start) return errResult(`code_search: path outside the project folder: ${rel}`);
       let re: RegExp;
       const m = pattern.value.match(/^\/(.+)\/([gimsuy]*)$/);
@@ -319,7 +340,7 @@ function writeFileTool(): ToolDefinition {
       const content = reqString(input, "content");
       if (!p.ok) return errResult(p.error);
       if (!content.ok) return errResult(content.error);
-      const abs = resolveInside(ctx.cwd, p.value);
+      const abs = resolveInsideSecure(ctx.cwd, p.value);
       if (!abs) return errResult(`write_file: path outside the project folder: ${p.value}`);
       const oldContent = fs.existsSync(abs) ? fs.readFileSync(abs, "utf-8") : null;
       try {
@@ -374,7 +395,7 @@ function strReplaceTool(): ToolDefinition {
         replacements.push(n);
       }
       if (replacements.length === 0) return errResult("str_replace: no replacements given");
-      const abs = resolveInside(ctx.cwd, p.value);
+      const abs = resolveInsideSecure(ctx.cwd, p.value);
       if (!abs) return errResult(`str_replace: path outside the project folder: ${p.value}`);
       let raw: string;
       try {
@@ -419,54 +440,37 @@ function runTerminalCommandTool(): ToolDefinition {
       const command = reqString(input, "command");
       if (!command.ok) return errResult(command.error);
       const relCwd = optString(input, "cwd", ".") ?? ".";
-      const cwd = resolveInside(ctx.cwd, relCwd);
+      const cwd = resolveInsideSecure(ctx.cwd, relCwd);
       if (!cwd) return errResult(`run_terminal_command: cwd outside the project folder: ${relCwd}`);
-      const timeoutMs = (() => {
-        const t = clampTimeoutSeconds(optNumber(input, "timeout_seconds", 120));
-        return t === null ? null : t * 1000;
-      })();
-      return new Promise<ToolResult>((resolve) => {
-        const child = spawn("bash", ["-c", command.value], { cwd, shell: false });
-        let stdout = "";
-        let stderr = "";
-        let settled = false;
-        const finish = (result: ToolResult) => {
-          if (settled) return;
-          settled = true;
-          resolve(result);
-        };
-        const timer =
-          timeoutMs === null
-            ? null
-            : setTimeout(() => {
-                child.kill("SIGTERM");
-                setTimeout(() => child.kill("SIGKILL"), 1500);
-              }, timeoutMs);
-        child.stdout.on("data", (d: Buffer) => {
-          stdout += d.toString("utf-8");
-        });
-        child.stderr.on("data", (d: Buffer) => {
-          stderr += d.toString("utf-8");
-        });
-        child.on("error", (e) => {
-          if (timer) clearTimeout(timer);
-          finish(errResult(JSON.stringify({ command: command.value, errorMessage: e.message })));
-        });
-        child.on("close", (code) => {
-          if (timer) clearTimeout(timer);
-          finish(
-            okResult(
-              JSON.stringify({
-                command: command.value,
-                startingCwd: cwd,
-                stdout: capOutput(stdout),
-                stderr: capOutput(stderr),
-                exitCode: code ?? -1,
-              }),
-            ),
-          );
-        });
+      // Fase 8 layer 1: validate the command content before it runs.
+      // A denial is a tool error (ok:false) with the reason — the model
+      // sees what was blocked and why, and can try a different command.
+      const blocked = validateShellCommand(command.value, cwd);
+      if (blocked) return errResult(`run_terminal_command: blocked: ${blocked}`);
+      const timeoutSeconds = clampTimeoutSeconds(optNumber(input, "timeout_seconds", 120));
+      // Fase 8 layer 2: the child runs in a user+mount namespace when
+      // the platform supports it (credential dirs masked), otherwise
+      // with validation + a scrubbed environment only. The child's
+      // environment never inherits the parent's secrets — a
+      // model-invoked `env` cannot dump METATECH_API_KEY.
+      const redact = ctx.redact ?? ((t: string) => t);
+      const r = await runShellCommand(command.value, {
+        cwd,
+        env: scrubShellEnv(process.env),
+        timeoutSeconds,
       });
+      const result = okResult(
+        JSON.stringify({
+          command: redact(command.value),
+          startingCwd: cwd,
+          stdout: capOutput(redact(r.stdout)),
+          stderr: capOutput(redact(r.stderr)),
+          exitCode: r.exitCode ?? -1,
+          sandbox: r.sandbox,
+        }),
+      );
+      result.sandbox = r.sandbox;
+      return result;
     },
   };
 }

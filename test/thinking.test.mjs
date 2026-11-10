@@ -9,10 +9,42 @@ import {
   generateShimmerPalette,
   shimmerSegments,
   shouldShowThinking,
+  statusRightItems,
 } from "../dist/ui/thinking.js";
 
-test("shimmer interval is Freebuff's 180ms", () => {
-  assert.equal(SHIMMER_INTERVAL_MS, 180);
+// Freebuff status-bar.tsx SHIMMER_INTERVAL_MS = 160 — the status bar
+// passes its own interval to ShimmerText (whose DEFAULT is 180).
+test("shimmer interval is Freebuff status-bar's 160ms", () => {
+  assert.equal(SHIMMER_INTERVAL_MS, 160);
+});
+
+test("statusRightItems: full cluster at desktop width (step + timer + Esc)", () => {
+  const items = statusRightItems({ showStep: true, agentSteps: 1, elapsedSec: 5, narrow: false, availableWidth: 76 });
+  assert.deepEqual(items, { step: "Agent step 1", timer: "5s" });
+});
+
+test("statusRightItems: narrow form uses 'Step N'", () => {
+  const items = statusRightItems({ showStep: true, agentSteps: 12, elapsedSec: 90, narrow: true, availableWidth: 36 });
+  assert.deepEqual(items, { step: "Step 12", timer: "1m 30s" });
+});
+
+test("statusRightItems: no step when the agent is not running, no timer at 0s", () => {
+  const items = statusRightItems({ showStep: false, agentSteps: 0, elapsedSec: 0, narrow: false, availableWidth: 76 });
+  assert.deepEqual(items, { step: null, timer: null });
+});
+
+test("statusRightItems: cascade drops the timer first, then the step (Esc never drops)", () => {
+  // Label 10 + gap 1 + cluster. Full cluster: step 12 + gap + timer 2
+  // + gap + Esc 7 = 23 -> total 10+1+23 = 34. Step-only cluster is
+  // 12+1+7 = 20 -> total 10+1+20 = 31.
+  const tight = statusRightItems({ showStep: true, agentSteps: 1, elapsedSec: 5, narrow: false, availableWidth: 30 });
+  assert.deepEqual(tight, { step: null, timer: null });
+  // At width 31 the step alone fits (31) but the timer does not (34).
+  const mid = statusRightItems({ showStep: true, agentSteps: 1, elapsedSec: 5, narrow: false, availableWidth: 31 });
+  assert.deepEqual(mid, { step: "Agent step 1", timer: null });
+  // At width 34 the full cluster fits.
+  const wide = statusRightItems({ showStep: true, agentSteps: 1, elapsedSec: 5, narrow: false, availableWidth: 34 });
+  assert.deepEqual(wide, { step: "Agent step 1", timer: "5s" });
 });
 
 test("generateShimmerPalette: lightness sweep around the primary, flat fallback on bad hex", () => {

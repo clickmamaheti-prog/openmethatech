@@ -56,6 +56,62 @@ export function formatElapsedTime(elapsedSeconds: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// Status-bar right cluster — Freebuff `cli/src/components/status-bar.tsx`
+// right zone (flex row, justifyContent flex-end, gap 1): the elapsed
+// timer (theme.secondary) + the ■ Esc stop button (StatusActionButton,
+// its own paddingLeft/Right 1, theme.secondary). Freebuff has NO agent
+// step in the status bar (grep: zero hits in cli/src) — "Agent step N"
+// is MethaTech-only info, so it sits FIRST in the right cluster with
+// the timer, per the right zone's mechanism. The cluster is separate
+// flex items, never one " · "-joined string: the gaps come from the
+// layout (gap 1 + the Esc button's own padding), never from spaces
+// baked into a string. Narrow cascade (same style as the footer line
+// cascade in ChatApp): the cluster must always fit the row — the
+// timer drops first, then the step; ■ Esc never drops (Freebuff
+// always renders the stop button while waiting/streaming).
+// ---------------------------------------------------------------------------
+
+export interface StatusRightItems {
+  /** "Agent step N" (wide) / "Step N" (narrow), null when hidden. */
+  step: string | null;
+  /** Elapsed time ("5s" / "1m 30s"), null when 0 or dropped. */
+  timer: string | null;
+}
+
+export function statusRightItems(opts: {
+  /** The agent is running (the step only shows while it is). */
+  showStep: boolean;
+  agentSteps: number;
+  elapsedSec: number;
+  narrow: boolean;
+  /** Width the whole row content may use (label + zone gap + cluster). */
+  availableWidth: number;
+}): StatusRightItems {
+  const LABEL_WIDTH = 10; // "thinking..." / "working..."
+  const ZONE_GAP = 1; // minimum gap between the left indicator and the right cluster
+  const ESC_WIDTH = 7; // "■ Esc" (5) + Freebuff StatusActionButton padding 1/1
+  const step = opts.showStep
+    ? opts.narrow
+      ? `Step ${opts.agentSteps}`
+      : `Agent step ${opts.agentSteps}`
+    : null;
+  const timer = opts.elapsedSec > 0 ? formatElapsedTime(opts.elapsedSec) : null;
+  const clusterWidth = (s: string | null, t: string | null): number => {
+    let w = ESC_WIDTH;
+    if (s !== null) w += s.length + 1; // item + its gap to the next
+    if (t !== null) w += t.length + 1;
+    return w;
+  };
+  if (LABEL_WIDTH + ZONE_GAP + clusterWidth(step, timer) <= opts.availableWidth) {
+    return { step, timer };
+  }
+  if (LABEL_WIDTH + ZONE_GAP + clusterWidth(step, null) <= opts.availableWidth) {
+    return { step, timer: null };
+  }
+  return { step: null, timer: null };
+}
+
+// ---------------------------------------------------------------------------
 // Shimmer — Freebuff `cli/src/components/shimmer-text.tsx`
 // (ShimmerText). Per-character color sweep: a palette is generated
 // from the primary color by varying lightness ±0.22 (HSL), sized
@@ -155,7 +211,11 @@ export interface ShimmerSegment {
   dim: boolean;
 }
 
-export const SHIMMER_INTERVAL_MS = 180;
+/** Freebuff status-bar.tsx SHIMMER_INTERVAL_MS = 160 — the status
+    bar passes its own interval to ShimmerText (whose DEFAULT is
+    180); the MethaTech Thinking component IS the status-bar
+    shimmer, so it uses the status bar's 160, not the default. */
+export const SHIMMER_INTERVAL_MS = 160;
 
 /**
  * Per-character shimmer segments for one pulse position (Freebuff

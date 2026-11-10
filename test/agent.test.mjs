@@ -87,6 +87,53 @@ test("parser: unclosed tag is a parse error", () => {
   assert.equal(r.filteredText, "text ");
 });
 
+// --- Alias tag <codex_tool_call> (live bug 2026-11-09: glm-5.3-flash
+// emitted the codex tag with an identical {"cb_tool_name": ...} body;
+// the old parser let it leak as visible text and the turn ended) ---
+
+test("parser: codex alias tag extracts the same tool call", () => {
+  const r = parseFullText(
+    `Baik, saya cek isi proyek dulu.\n<codex_tool_call>\n{"cb_tool_name": "list_directory", "path": "."}\n</codex_tool_call>`,
+  );
+  assert.equal(r.toolCalls.length, 1);
+  assert.equal(r.toolCalls[0].toolName, "list_directory");
+  assert.deepEqual(r.toolCalls[0].input, { path: "." });
+  assert.equal(r.filteredText, "Baik, saya cek isi proyek dulu.\n");
+  assert.deepEqual(r.parseErrors, []);
+});
+
+test("parser: codex alias tag split across chunks", () => {
+  const state = createStreamParserState();
+  const full = `start <codex_tool_call>\n{"cb_tool_name": "glob", "pattern": "src/**"}\n</codex_tool_call> end`;
+  let filtered = "";
+  const calls = [];
+  for (const ch of full) {
+    const r = parseStreamChunk(ch, state);
+    filtered += r.filteredText;
+    calls.push(...r.toolCalls);
+  }
+  assert.equal(filtered, "start  end");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].toolName, "glob");
+});
+
+test("parser: canonical and alias tags mix in one response", () => {
+  const text =
+    `${formatToolCall("read_files", { paths: ["a.txt"] })}` +
+    `<codex_tool_call>\n{"cb_tool_name": "list_directory", "path": "."}\n</codex_tool_call>`;
+  const r = parseFullText(text);
+  assert.equal(r.toolCalls.length, 2);
+  assert.equal(r.toolCalls[0].toolName, "read_files");
+  assert.equal(r.toolCalls[1].toolName, "list_directory");
+});
+
+test("parser: unclosed codex alias tag is a parse error", () => {
+  const r = parseFullText(`text <codex_tool_call>\n{"cb_tool_name": "glob"}`);
+  assert.equal(r.toolCalls.length, 0);
+  assert.equal(r.parseErrors.length, 1);
+  assert.equal(r.filteredText, "text ");
+});
+
 // --- Modes ---
 
 test("modes: PLAN removes mutating tools at the toolset level", () => {
@@ -392,6 +439,57 @@ test("loop: mock model reads a file then completes", async () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+// Live bug 2026-11-09 (Reza Termux, glm-5.3-flash): the model echoed
+// two whole files back into its reply as a fenced code block — a gray
+// wall of dozens of lines — even though the tool-result display was
+// already truncated to a 120-char summary. The wall came from the
+// model's own text, so the fix is prompt-side (Freebuff
+// AGENT_PROGRESS_GUIDANCE: progress text is normal assistant text,
+// never tool arguments or terminal output) + display-side (read_files
+// shows paths only, like Freebuff read-files.tsx).
+
+test("prompt: system prompt forbids pasting tool output back into replies", () => {
+  const dir = tmpDir();
+  const prompt = buildAgentSystemPrompt({
+    mode: "DEFAULT",
+    cwd: dir,
+    model: "glm-5.3-flash",
+    project: buildProjectContext(dir),
+  });
+  assert.ok(prompt.includes("Never paste file contents, terminal output, or other tool output back into your reply"));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("loop: read of a large file keeps the FULL content in model history", async () => {
+  const dir = tmpDir();
+  const lines = Array.from({ length: 60 }, (_, i) => `BARIS BESAR ${String(i + 1).padStart(2, "0")} isi baris besar`);
+  fs.writeFileSync(path.join(dir, "big.txt"), lines.join("\n") + "\n");
+  const result = await runAgentLoop({
+    apiKey: "test",
+    model: "glm-5.3-flash",
+    cwd: dir,
+    mode: "DEFAULT",
+    userPrompt: "baca big.txt",
+    callModel: mockModel([
+      formatToolCall("read_files", { paths: ["big.txt"] }),
+      `${formatToolCall("task_completed", { summary: "selesai" })}All done.`,
+    ]),
+  });
+  assert.equal(result.completed, true);
+  // The system prompt (history[0]) carries the no-echo rule to the model.
+  assert.ok(result.history[0].content.includes("Never paste file contents"));
+  // The tool message keeps the WHOLE file: first AND last line present,
+  // so display truncation never starves the model of context.
+  const toolMsg = result.history.find((m) => m.role === "tool");
+  assert.ok(toolMsg);
+  assert.match(toolMsg.content, /BARIS BESAR 01/);
+  assert.match(toolMsg.content, /BARIS BESAR 60/);
+  // ...while the display summary for that same read is null (paths only).
+  const { summarizeToolResult } = await import("../dist/ui/tool-summary.js");
+  assert.equal(summarizeToolResult("read_files", toolMsg.content, true), null);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("loop: plain-text answer ends the turn without tool calls", async () => {
   const dir = tmpDir();
   const result = await runAgentLoop({
@@ -424,6 +522,97 @@ test("loop: malformed tool JSON forces a retry step", async () => {
   assert.equal(result.completed, true);
   assert.equal(result.steps, 2);
   assert.ok(result.history.some((m) => m.role === "user" && m.content.includes("TOOL_CALL_ERROR")));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// --- Live bug 2026-11-09 (Reza Termux, glm-5.3-flash): the model
+// emitted <codex_tool_call> and the turn ended with the raw block on
+// screen; then it promised "saya cek proyeknya sekarang" with no call
+// and the agent went silent. ---
+
+test("loop: codex alias tag executes the tool (live bug repro)", async () => {
+  const dir = tmpDir();
+  fs.writeFileSync(path.join(dir, "hello.txt"), "hi\n");
+  const result = await runAgentLoop({
+    apiKey: "test",
+    model: "glm-5.3-flash",
+    cwd: dir,
+    mode: "DEFAULT",
+    userPrompt: "cek projeck kita",
+    callModel: mockModel([
+      `Baik, saya cek isi proyek dulu.\n<codex_tool_call>\n{"cb_tool_name": "list_directory", "path": "."}\n</codex_tool_call>`,
+      formatToolCall("task_completed", { summary: "selesai" }),
+    ]),
+  });
+  assert.equal(result.completed, true);
+  assert.equal(result.steps, 2);
+  assert.equal(result.stopReason, "task_completed");
+  const toolMsg = result.history.find((m) => m.role === "tool");
+  assert.ok(toolMsg);
+  assert.match(toolMsg.content, /hello\.txt/);
+  assert.doesNotMatch(result.finalText, /codex_tool_call/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("loop: promised tool use with no call gets nudged, then complies", async () => {
+  const dir = tmpDir();
+  fs.writeFileSync(path.join(dir, "hello.txt"), "hi\n");
+  const result = await runAgentLoop({
+    apiKey: "test",
+    model: "glm-5.3-flash",
+    cwd: dir,
+    mode: "DEFAULT",
+    userPrompt: "cek projeck kita",
+    callModel: mockModel([
+      "Haha, oke oke, saya cek proyeknya sekarang.",
+      formatToolCall("list_directory", { path: "." }),
+      "Selesai, ini isi proyeknya.",
+    ]),
+  });
+  assert.equal(result.completed, true);
+  assert.equal(result.steps, 3);
+  assert.ok(result.history.some((m) => m.role === "user" && m.content.includes("TOOL_CALL_MISSING")));
+  const toolMsg = result.history.find((m) => m.role === "tool");
+  assert.ok(toolMsg);
+  assert.match(toolMsg.content, /hello\.txt/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("loop: promise twice with no call ends the turn after 2 nudges", async () => {
+  const dir = tmpDir();
+  const result = await runAgentLoop({
+    apiKey: "test",
+    model: "glm-5.3-flash",
+    cwd: dir,
+    mode: "DEFAULT",
+    userPrompt: "cek projeck kita",
+    callModel: mockModel(["Haha, oke oke, saya cek proyeknya sekarang."]),
+  });
+  assert.equal(result.completed, false);
+  assert.equal(result.steps, 3);
+  // Fase 6: exhausting both nudges is a protocol failure — the turn
+  // stops explicitly instead of completing silently as "no more
+  // tool calls". Two nudges are still sent; the step count is the same.
+  assert.match(result.stopReason, /protocol violation/);
+  assert.match(result.finalText, /promised tool work/);
+  const nudges = result.history.filter((m) => m.role === "user" && m.content.includes("TOOL_CALL_MISSING"));
+  assert.equal(nudges.length, 2);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("loop: plain greeting answer still ends in 1 step (no false nudge)", async () => {
+  const dir = tmpDir();
+  const result = await runAgentLoop({
+    apiKey: "test",
+    model: "glm-5.3-flash",
+    cwd: dir,
+    mode: "DEFAULT",
+    userPrompt: "halo",
+    callModel: mockModel(["Halo! Ada yang bisa saya bantu?"]),
+  });
+  assert.equal(result.completed, true);
+  assert.equal(result.steps, 1);
+  assert.ok(!result.history.some((m) => m.role === "user" && m.content.includes("TOOL_CALL_MISSING")));
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -526,6 +715,16 @@ test("prompt: system prompt names MethaTech, never Buffy/Playground, and lists t
   assert.match(prompt, /read_files/);
   const planPrompt = buildAgentSystemPrompt({ mode: "PLAN", cwd: dir, model: "glm-5.3-flash", project });
   assert.doesNotMatch(planPrompt, /write_file: /);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("prompt: forbids other tag names and announcing a tool without emitting it (live bug 2026-11-09)", () => {
+  const dir = tmpDir();
+  const project = buildProjectContext(dir);
+  const prompt = buildAgentSystemPrompt({ mode: "DEFAULT", cwd: dir, model: "glm-5.3-flash", project });
+  assert.match(prompt, /Never use any other tag name/);
+  assert.match(prompt, /codex_tool_call/);
+  assert.match(prompt, /Never announce that you will use a tool without emitting the call in the same response/);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

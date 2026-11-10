@@ -1,4 +1,5 @@
 import { apiBase, consoleBase } from "./config.js";
+import type { OpenAiFunctionTool } from "./agent/tool-registry.js";
 
 export class ApiError extends Error {
   status: number;
@@ -224,11 +225,42 @@ export interface StreamHandlers {
   onUsage: (usage: ChatUsage) => void;
   /** Reasoning deltas (delta.reasoning_content), when the server sends them. */
   onReasoning?: (text: string) => void;
+  /** Finish reason from the final choice (stop/length/tool_calls/
+   *  content_filter/...), when the server sends it. Added for the
+   *  Fase 2 model adapter (it normalizes this into a `finish`
+   *  chunk); no existing caller is affected. */
+  onFinishReason?: (reason: string | null) => void;
+  /** Native tool-call deltas (delta.tool_calls), when the server
+   *  sends them. Fase 9 probe only: the panel normally forwards
+   *  these only when the request carries `tools`. The CLI never
+   *  sends tools outside the probe path (see model-adapter.ts). */
+  onToolCallDelta?: (delta: ToolCallDelta) => void;
+}
+
+/** One streamed native tool-call delta (OpenAI SSE shape). */
+export interface ToolCallDelta {
+  index: number;
+  id?: string;
+  name?: string;
+  /** A fragment of the JSON arguments string; accumulate per index. */
+  arguments?: string;
 }
 
 export interface StreamOptions {
   /** Abort the request (Esc / Ctrl+C interrupt). Combined with the 120s timeout. */
   signal?: AbortSignal;
+  /**
+   * Native function tools, sent verbatim to the panel relay.
+   * Fase 9 probe only (the adapter gates it behind
+   * probeNativeTools); the CLI never sends tools in normal use.
+   */
+  tools?: OpenAiFunctionTool[];
+  /**
+   * JSON mode request ({ type: "json_object" }). Fase 9 probe
+   * only, to test structured-output support through the relay;
+   * the CLI never sets it in normal use.
+   */
+  responseFormat?: { type: "json_object" };
 }
 
 /**
@@ -243,23 +275,48 @@ export async function streamChat(
   maxTokens = 1024,
   opts: StreamOptions = {},
 ): Promise<{ usage: ChatUsage | null }> {
-  const signals = [AbortSignal.timeout(120000)];
+  // Fase 7: the timeout signal is NAMED so a timeout abort can be
+  // told apart from a user abort (Esc / Ctrl+C) below. Before this,
+  // both surfaced as AbortError/TimeoutError and a slow model looked
+  // exactly like a user interrupt — and a timeout was never
+  // retryable. A timeout is a server-side failure: it is reported
+  // as HTTP 408 so the adapter maps it to kind "server"
+  // (retryable); a user abort stays an AbortError (not retryable).
+  const timeoutSignal = AbortSignal.timeout(120000);
+  const signals = [timeoutSignal];
   if (opts.signal) signals.push(opts.signal);
-  const res = await fetch(`${apiBase()}/v1/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      max_tokens: maxTokens,
-      stream: true,
-      stream_options: { include_usage: true },
-    }),
-    signal: AbortSignal.any(signals),
-  });
+  /** Map an abort during the request (see above). */
+  const mapAbort = (e: unknown): unknown => {
+    if (opts.signal?.aborted) return e;
+    if (timeoutSignal.aborted) {
+      return new ApiError(408, "Permintaan ke model kehabisan waktu (120 detik). Model atau panel lambat — coba lagi.");
+    }
+    return e;
+  };
+  let res: Response;
+  try {
+    res = await fetch(`${apiBase()}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        max_tokens: maxTokens,
+        stream: true,
+        stream_options: { include_usage: true },
+        // Fase 9 probe only: absent in normal use, so the request
+        // is byte-identical to before when no probe option is set.
+        ...(opts.tools && opts.tools.length > 0 ? { tools: opts.tools } : {}),
+        ...(opts.responseFormat ? { response_format: opts.responseFormat } : {}),
+      }),
+      signal: AbortSignal.any(signals),
+    });
+  } catch (e) {
+    throw mapAbort(e);
+  }
   if (!res.ok) throw friendlyError(res.status, await res.text());
   if (!res.body) throw new ApiError(0, "Tidak ada body stream dari server");
 
@@ -275,7 +332,15 @@ export async function streamChat(
     try {
       const chunk = JSON.parse(payload) as {
         choices?: {
-          delta?: { content?: string; reasoning_content?: string };
+          delta?: {
+            content?: string;
+            reasoning_content?: string;
+            tool_calls?: {
+              index?: number;
+              id?: string;
+              function?: { name?: string; arguments?: string };
+            }[];
+          };
           finish_reason?: string | null;
         }[];
         usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null;
@@ -284,6 +349,19 @@ export async function streamChat(
       if (typeof delta === "string" && delta.length > 0) handlers.onDelta(delta);
       const reasoning = chunk.choices?.[0]?.delta?.reasoning_content;
       if (typeof reasoning === "string" && reasoning.length > 0) handlers.onReasoning?.(reasoning);
+      const toolCalls = chunk.choices?.[0]?.delta?.tool_calls;
+      if (Array.isArray(toolCalls)) {
+        for (const tc of toolCalls) {
+          const index = typeof tc.index === "number" ? tc.index : 0;
+          const name = tc.function?.name;
+          const args = tc.function?.arguments;
+          if (typeof tc.id === "string" || typeof name === "string" || typeof args === "string") {
+            handlers.onToolCallDelta?.({ index, id: tc.id, name, arguments: args });
+          }
+        }
+      }
+      const finishReason = chunk.choices?.[0]?.finish_reason;
+      if (typeof finishReason === "string") handlers.onFinishReason?.(finishReason);
       if (chunk.usage && typeof chunk.usage.prompt_tokens === "number") {
         usage = {
           promptTokens: chunk.usage.prompt_tokens,
@@ -297,17 +375,21 @@ export async function streamChat(
     }
   };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let idx = buffer.indexOf("\n\n");
-    while (idx !== -1) {
-      const event = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 2);
-      for (const line of event.split("\n")) handleLine(line.trim());
-      idx = buffer.indexOf("\n\n");
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx = buffer.indexOf("\n\n");
+      while (idx !== -1) {
+        const event = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        for (const line of event.split("\n")) handleLine(line.trim());
+        idx = buffer.indexOf("\n\n");
+      }
     }
+  } catch (e) {
+    throw mapAbort(e);
   }
   // Flush any trailing partial event.
   for (const line of buffer.split("\n")) handleLine(line.trim());

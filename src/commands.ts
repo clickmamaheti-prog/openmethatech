@@ -19,6 +19,7 @@ import ChatApp from "./ui/ChatApp.js";
 import ModelsScreen from "./ui/ModelsScreen.js";
 import AccountScreen from "./ui/AccountScreen.js";
 import { MOUSE_DISABLE, MOUSE_ENABLE } from "./ui/mouse.js";
+import { PASTE_DISABLE, PASTE_ENABLE } from "./ui/paste.js";
 
 function tryOpenUrl(url: string): void {
   const opener =
@@ -294,15 +295,31 @@ async function cmdChat(modelOpt?: string, opts?: { clearScreen?: boolean }): Pro
   // Disabled again on exit, including process.exit() paths, so a
   // crash/exit never leaves the shell in mouse mode (where clicks
   // would stop selecting text). A hard kill (SIGKILL) cannot run
-  // the guard; reset then with: printf '\e[?1006l\e[?1002l\e[?1000l'.
+  // the guard; reset then with: printf '\e[?1006l\e[?1002l\e[?1000l\e[?2004l'.
   process.stdout.write(MOUSE_ENABLE);
+  // Bracketed paste (DECSET 2004, see ./ui/paste.ts): the terminal
+  // wraps pastes in ESC[200~ ... ESC[201~, so a long paste arrives
+  // as one marked payload instead of keystrokes — the assembler in
+  // ChatApp can then tell a paste from typing, keep its newlines
+  // from submitting mid-paste, and turn it into an attachment card
+  // (Freebuff's renderer gets the same events from OpenTUI; Ink
+  // has no paste support at all, so the app enables the mode
+  // itself). Same scoping and exit guard as the mouse mode.
+  process.stdout.write(PASTE_ENABLE);
   let mouseDisabled = false;
   const disableMouse = () => {
     if (mouseDisabled) return;
     mouseDisabled = true;
     process.stdout.write(MOUSE_DISABLE);
   };
+  let pasteDisabled = false;
+  const disablePaste = () => {
+    if (pasteDisabled) return;
+    pasteDisabled = true;
+    process.stdout.write(PASTE_DISABLE);
+  };
   process.on("exit", disableMouse);
+  process.on("exit", disablePaste);
   const app = render(
     React.createElement(ChatApp, { apiKey, initialModel: model, catalog, balanceUsd: balance }),
     // exitOnCtrlC: false — Ctrl+C MUST reach ChatApp's own priority
@@ -316,6 +333,7 @@ async function cmdChat(modelOpt?: string, opts?: { clearScreen?: boolean }): Pro
   );
   await app.waitUntilExit();
   disableMouse();
+  disablePaste();
 }
 
 async function cmdModels(): Promise<void> {

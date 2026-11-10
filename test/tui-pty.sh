@@ -85,14 +85,25 @@ dash_run() { # dash_run <file> -> number of ─ chars on the divider row (spaces
   # NOTE: grep -E "^ +─+ *$" does NOT work here — in the C locale the
   # `+` applies to the last BYTE of the 3-byte ─, so the pattern never
   # matches. awk's gsub on the whole ─ string counts correctly. The
-  # row may carry a trailing scrollbar char (│/█) when the scrollbar
-  # shows — strip that too, it is not divider content.
+  # row used to carry a trailing scrollbar char (│/█) while the
+  # scrollbar showed — 0.1.9 §4q removed the scrollbar, so no
+  # trailing char is expected anymore; the strip stays as a guard.
   awk '{ n=gsub(/─/, "─"); rest=$0; gsub(/[ ─│█]/, "", rest); if (n>0 && rest=="") { print n; exit } }' "$1"
 }
 check_dash_run() { # check_dash_run <file> <expected> <label>
   local got
   got=$(dash_run "$1")
   if [ "$got" = "$2" ]; then echo "PASS: $3"; PASS=$((PASS+1)); else echo "FAIL: $3 (divider run $got, expected $2)"; FAIL=$((FAIL+1)); fi
+}
+check_no_track() { # check_no_track <file> <label> — no message-area row ends with a scrollbar char (│/█)
+  # Rows above the input box top border (first ╭ row) are the message
+  # area; the input box itself legitimately ends its middle row with
+  # │, and the footer below it is out of scope. Trailing spaces are
+  # trimmed before testing the last character. 0.1.9 §4q: the
+  # scrollbar is gone, so no message-area row may end with │ or █.
+  local bad
+  bad=$(awk 'NR==1{input=9999} /╭/ && input==9999 {input=NR} { line=$0; sub(/ +$/, "", line); if (NR < input && line ~ /[│█]$/) { print NR; exit } }' "$1")
+  if [ -z "$bad" ]; then echo "PASS: $2"; PASS=$((PASS+1)); else echo "FAIL: $2 (message-area row $bad ends with a scrollbar char)"; FAIL=$((FAIL+1)); fi
 }
 reset_credentials() { # reset_credentials — fresh credentials without firstPromptSubmitted
   printf '{"apiKey":"test-key-pty","defaultModel":"glm-5.3-flash","savedAt":"2026-11-08T00:00:00Z"}' > "$METATECH_CONFIG_DIR/credentials.json"
@@ -137,6 +148,24 @@ wheel() { # wheel <up|down> <count> — inject N SGR mouse-wheel events in one
 tap() { # tap — inject one SGR left-click press+release (a Termux tap
   # with mouse tracking on); the TUI must swallow it, never type it.
   tmux send-keys -t "$SESSION" -H 1b 5b 3c 30 3b 31 30 3b 35 4d 1b 5b 3c 30 3b 31 30 3b 35 6d; sleep 1
+}
+paste_bracketed() { # paste_bracketed <file> — inject a file's bytes as
+  # ONE bracketed paste (ESC[200~ ... ESC[201~) via send-keys -H,
+  # exactly what a terminal sends once the app enabled 2004h
+  # (verified against the Ink probe 2026-11-09: the markers arrive
+  # as separate useInput calls, the payload possibly split across
+  # calls — the assembler must handle both).
+  local hex
+  hex=$(python3 -c "
+import sys
+data = open(sys.argv[1], 'rb').read()
+out = ['1b', '5b', '32', '30', '30', '7e']
+out += [format(b, '02x') for b in data]
+out += ['1b', '5b', '32', '30', '31', '7e']
+print(' '.join(out))
+" "$1")
+  # shellcheck disable=SC2086
+  tmux send-keys -t "$SESSION" -H $hex; sleep 1
 }
 stop_tui() { tmux send-keys -t "$SESSION" C-c; sleep 1; tmux kill-session -t "$SESSION" 2>/dev/null; }
 
@@ -292,7 +321,8 @@ capture s10-pageup
 check "$OUTDIR/s10-pageup.plain.txt" "pesan 27" "s10: one PgUp shows history one page up"
 check "$OUTDIR/s10-pageup.plain.txt" "baris di atas" "s10: scroll indicator shown while scrolled up"
 check "$OUTDIR/s10-pageup.plain.txt" "↓ PgDn" "s10: scroll-to-bottom affordance in the footer while scrolled up"
-check "$OUTDIR/s10-pageup.plain.txt" "█" "s10: scrollbar thumb track visible while scrolled up"
+check_absent "$OUTDIR/s10-pageup.plain.txt" "█" "s10: no scrollbar thumb while scrolled up (removed §4q, scroll still works)"
+check_no_track "$OUTDIR/s10-pageup.plain.txt" "s10: no scrollbar track at the right edge while scrolled up (§4q)"
 check_last_row "$OUTDIR/s10-pageup.plain.txt" "╰" 22 "s10: input box bottom border stays on row 22 while scrolled up"
 for _ in $(seq 1 9); do tmux send-keys -t "$SESSION" PageUp; sleep 0.2; done
 sleep 0.3
@@ -304,7 +334,8 @@ capture s10-pagedown
 check "$OUTDIR/s10-pagedown.plain.txt" "Ini balasan mock." "s10: PgDn returns to latest reply"
 check_absent "$OUTDIR/s10-pagedown.plain.txt" "│ You: pesan 01" "s10: back at bottom, old history hidden again"
 check_absent "$OUTDIR/s10-pagedown.plain.txt" "↓ PgDn" "s10: no scroll-to-bottom affordance once back at the bottom"
-check "$OUTDIR/s10-pagedown.plain.txt" "│" "s10: scrollbar track still visible at the bottom while history overflows (thumb sits at the bottom)"
+check_absent "$OUTDIR/s10-pagedown.plain.txt" "█" "s10: no scrollbar thumb at the bottom while history overflows (§4q)"
+check_no_track "$OUTDIR/s10-pagedown.plain.txt" "s10: no scrollbar track at the right edge at the bottom (§4q)"
 stop_tui
 
 # --- Scenario 11: picker + palette on a short terminal (40x15) ---
@@ -356,12 +387,14 @@ check "$OUTDIR/s13-welcome-desktop.plain.txt" "Try:" "s13: welcome suggestions l
 check "$OUTDIR/s13-welcome-desktop.plain.txt" "/models" "s13: welcome suggests /models"
 check_row "$OUTDIR/s13-welcome-desktop.plain.txt" "MethaTech" 1 "s13: header still on row 1 with welcome"
 check_last_row "$OUTDIR/s13-welcome-desktop.plain.txt" "╰" 22 "s13: input box bottom border on row 22 with welcome"
-# The wordmark banner sits in the middle of the message area, not at the top.
+# 0.1.9 §4o: welcome is TOP-anchored (Freebuff chat.tsx flex-start) —
+# the banner is the first content row of the message area (row 2,
+# directly below the header), the empty space sits below the block.
 banner_row=$(row_of "$OUTDIR/s13-welcome-desktop.plain.txt" "M   M")
-if [ -n "$banner_row" ] && [ "$banner_row" -gt 2 ] && [ "$banner_row" -lt 12 ]; then
-  echo "PASS: s13: banner vertically centered (row $banner_row)"; PASS=$((PASS+1))
+if [ "$banner_row" = "2" ]; then
+  echo "PASS: s13: banner top-anchored (row 2)"; PASS=$((PASS+1))
 else
-  echo "FAIL: s13: banner not centered (row '${banner_row:-none}', expected 3-11)"; FAIL=$((FAIL+1))
+  echo "FAIL: s13: banner not top-anchored (row '${banner_row:-none}', expected 2)"; FAIL=$((FAIL+1))
 fi
 stop_tui
 start_tui 40 15
@@ -390,16 +423,17 @@ send Enter
 sleep 1
 send Up
 capture s15-history-up
-# The recalled text must sit on the input row (21: the box
-# content row, one above the bottom border), not just in the log above.
-if sed -n '21p' "$OUTDIR/s15-history-up.plain.txt" | grep -q "pesan history"; then
+# The recalled text must sit on the input row (20: the centered
+# middle row of the 5-row composer, 0.1.9 §4o — was 21 with the
+# 3-row box), not just in the log above.
+if sed -n '20p' "$OUTDIR/s15-history-up.plain.txt" | grep -q "pesan history"; then
   echo "PASS: s15: Up recalls last message into the input"; PASS=$((PASS+1))
 else
   echo "FAIL: s15: Up did not recall into the input"; FAIL=$((FAIL+1))
 fi
 send Down
 capture s15-history-down
-if sed -n '21p' "$OUTDIR/s15-history-down.plain.txt" | grep -q "pesan history"; then
+if sed -n '20p' "$OUTDIR/s15-history-down.plain.txt" | grep -q "pesan history"; then
   echo "FAIL: s15: Down did not clear the recalled draft"; FAIL=$((FAIL+1))
 else
   echo "PASS: s15: Down past newest clears the draft"; PASS=$((PASS+1))
@@ -472,7 +506,7 @@ check "$OUTDIR/s21-chatbox-desktop.plain.txt" "╭" "s21: input box top border r
 check "$OUTDIR/s21-chatbox-desktop.plain.txt" "╰" "s21: input box bottom border renders at 80x24"
 check "$OUTDIR/s21-chatbox-desktop.plain.txt" "Enter a coding task or / for commands" "s21: placeholder inside the input box at 80x24"
 check_last_row "$OUTDIR/s21-chatbox-desktop.plain.txt" "╰" 22 "s21: input box bottom border on row 22 at 80x24"
-check_row "$OUTDIR/s21-chatbox-desktop.plain.txt" "Enter a coding task" 21 "s21: placeholder on the input row 21 at 80x24"
+check_row "$OUTDIR/s21-chatbox-desktop.plain.txt" "Enter a coding task" 20 "s21: placeholder on the centered input row 20 at 80x24 (0.1.9 §4o: 5-row composer, middle row)"
 send "halo"
 send Enter
 sleep 1
@@ -657,11 +691,12 @@ check_lead "$OUTDIR/s26-gutter-80.plain.txt" "┌" 2 "s26/80: table top border a
 check_lead "$OUTDIR/s26-gutter-80.plain.txt" "Agent: Default" 1 "s26/80: footer at col 1 (status-bar layer)"
 check_lead "$OUTDIR/s26-gutter-80.plain.txt" "╭" 1 "s26/80: input border at col 1"
 check "$OUTDIR/s26-gutter-80.plain.txt" " │ ▋Enter a coding task" "s26/80: input placeholder after border + padding (cursor col 3, text col 4; box unchanged)"
-# Divider is 74, not 75: the Freebuff-faithful renderer puts a blank
-# line after every list/quote/table/divider (0.1.8 §4h), so this
-# message is 22 lines in an 18-row area — the scrollbar shows and
-# the lines re-wrap 1 column narrower (same mechanism as s26/40).
-check_dash_run "$OUTDIR/s26-gutter-80.plain.txt" 74 "s26/80: divider is 74 wide when the scrollbar shows (re-wrap 1 narrower)"
+# Divider is 75, the full messageWidth: the Freebuff-faithful renderer
+# puts a blank line after every list/quote/table/divider (0.1.8 §4h),
+# so this message is 22 lines in an 18-row area and history overflows.
+# 0.1.9 §4q removed the scrollbar, so lines no longer re-wrap 1 column
+# narrower for a track — the reclaimed column goes back to the text.
+check_dash_run "$OUTDIR/s26-gutter-80.plain.txt" 75 "s26/80: divider is 75 wide (full messageWidth, no scrollbar re-wrap §4q)"
 # The heading and user line scrolled out of the bottom view (4 lines
 # hidden); one PgUp reaches the top.
 send PageUp
@@ -676,11 +711,11 @@ sleep 2
 capture s26-gutter-40
 check_lead "$OUTDIR/s26-gutter-40.plain.txt" "MethaTech" 2 "s26/40: header text at col 2 on narrow terminal"
 # At 40x15 the message area holds ~6 rows. The divider IS in the
-# bottom view; it is 34 wide, not 35 — when the scrollbar shows the
-# lines re-wrap 1 column narrower (pre-existing mechanism: the user
-# line is gutter + bar + space + text, so the text width must shrink
-# for the track to fit) and the divider follows the wrap width.
-check_dash_run "$OUTDIR/s26-gutter-40.plain.txt" 34 "s26/40: divider is 34 wide when the scrollbar shows (re-wrap 1 narrower)"
+# bottom view; it is 35 wide, the full messageWidth — 0.1.9 §4q
+# removed the scrollbar, so there is no 1-column re-wrap for a track
+# anymore (the user line is gutter + bar + space + text, and the
+# divider follows the wrap width).
+check_dash_run "$OUTDIR/s26-gutter-40.plain.txt" 35 "s26/40: divider is 35 wide (full messageWidth, no scrollbar re-wrap §4q)"
 # The message is 24 lines at 40 cols. One PgUp lands 1 line short
 # of the table top (13 hidden above); a second PgUp shows it.
 # Two more PgUps reach the top (3 hidden above after 3 PgUps).
@@ -729,9 +764,17 @@ capture s27-markdown-80-top
 check "$OUTDIR/s27-markdown-80-top.plain.txt" "Panduan Lengkap" "s27/80: H1 renders"
 check "$OUTDIR/s27-markdown-80-top.plain.txt" "teks tebal" "s27/80: bold text renders"
 check "$OUTDIR/s27-markdown-80-top.plain.txt" "1. pertama" "s27/80: numbered list renders"
-check "$OUTDIR/s27-markdown-80-top.plain.txt" "> Kutipan penting" "s27/80: blockquote renders"
 check_absent "$OUTDIR/s27-markdown-80-top.plain.txt" "**teks tebal**" "s27/80: no raw **bold** markers"
 check_absent "$OUTDIR/s27-markdown-80-top.plain.txt" "~~teks dicoret~~" "s27/80: no raw ~~strike~~ markers"
+# 0.1.9 §4o: the blockquote sits on flat line 17, but the message area
+# at 80x24 is now 16 rows (5-row centered composer), so even at the
+# very top the blockquote is 1 row below the fold — it can no longer
+# share one frame with the H1. One PageDown from the top lands the
+# window on lines 12-27, where the blockquote renders. The renderer
+# is unchanged; only the viewport is smaller, exactly as Freebuff's.
+send PageDown
+capture s27-markdown-80-mid
+check "$OUTDIR/s27-markdown-80-mid.plain.txt" "> Kutipan penting" "s27/80: blockquote renders (one page down from the top)"
 stop_tui
 start_tui 40 15
 send "tampilkan panduan"
@@ -744,6 +787,13 @@ send PageUp
 send PageUp
 send PageUp
 send PageUp
+# 0.1.9 §4o: the struck span sits on flat line 7, and the 7-row
+# message area at 40x15 shows lines 1-6 from the 7-PageUp landing —
+# 1 row short of it. The landing itself varies by a row across runs
+# (PageUp clamp/animation), so one PageDown after it pins the window
+# deterministically onto lines 5-11, where the struck line renders.
+# The renderer is unchanged; this only re-aims the viewport.
+send PageDown
 capture s27-markdown-40-top
 check "$OUTDIR/s27-markdown-40-top.plain.txt" "teks dicoret" "s27/40: struck text survives the wrap"
 check_absent "$OUTDIR/s27-markdown-40-top.plain.txt" "~~" "s27/40: no raw ~~ markers at narrow width (§4g)"
@@ -829,6 +879,361 @@ check "$OUTDIR/s28-wheel-40-down8.plain.txt" "↑ 9 baris di atas" "s28/40: 8 wh
 check_absent "$OUTDIR/s28-wheel-40-down8.plain.txt" "~~" "s28/40: no raw ~~ markers after wheel at narrow width"
 stop_tui
 unset MOCK_MARKDOWN_FULL
+
+# s29 — status-bar layout + assistant foreground (0.1.9 §4k): the
+# status row is Freebuff's status bar (status-bar.tsx) — its own root
+# box carries paddingLeft/Right 1, so the indicator lands on the same
+# column as the message text; the right cluster (Agent step + timer +
+# ■ Esc) is separate flex items with gap 1 in theme.secondary, the
+# Esc button in its own padded cell. The assistant reply renders in
+# theme.text (message-block.tsx textColor ?? foreground), not the
+# terminal default (gray on Reza's Termux).
+export MOCK_AGENT=1
+restart_mock 5000
+reset_credentials
+start_tui 80 24
+send "halo"
+send Enter
+sleep 0.5
+capture s29-status-80-thinking
+check "$OUTDIR/s29-status-80-thinking.plain.txt" "thinking..." "s29/80: thinking... shows while waiting"
+check_lead "$OUTDIR/s29-status-80-thinking.plain.txt" "thinking..." 2 "s29/80: indicator at 2 leading spaces, aligned with message text (was 1)"
+check_lead "$OUTDIR/s29-status-80-thinking.plain.txt" "MethaTech" 2 "s29/80: header still at 2 leading spaces"
+check "$OUTDIR/s29-status-80-thinking.plain.txt" "Agent step 1" "s29/80: agent step shows while waiting"
+check "$OUTDIR/s29-status-80-thinking.plain.txt" "■ Esc" "s29/80: Esc stop hint shows while waiting"
+check_absent "$OUTDIR/s29-status-80-thinking.plain.txt" "· ■ Esc" "s29/80: no dot-joined Esc (cluster is separate flex items)"
+# The status row itself carries no "·" separators anymore (the footer
+# line below still does — so check the row, not the file).
+if grep -F "thinking..." "$OUTDIR/s29-status-80-thinking.plain.txt" | grep -q "·"; then
+  echo "FAIL: s29/80: status row still has · separators"; FAIL=$((FAIL+1))
+else
+  echo "PASS: s29/80: status row has no · separators"; PASS=$((PASS+1))
+fi
+# First delta lands at 5s, the first agent stream runs ~0.9s; capture
+# mid-stream for the working... phase.
+sleep 4.2
+capture s29-status-80-working
+check "$OUTDIR/s29-status-80-working.plain.txt" "working..." "s29/80: working... shows while streaming"
+check_lead "$OUTDIR/s29-status-80-working.plain.txt" "working..." 2 "s29/80: working indicator at 2 leading spaces"
+check "$OUTDIR/s29-status-80-working.plain.txt" "Buat daftar tugas dulu." "s29/80: agent reply streams in"
+# The reply line carries the foreground color (tmux maps theme.text
+# #F5F5F5 to 256-color 255); before the fix the line had NO color
+# escape at all (terminal default = gray on Reza's Termux).
+if grep -F "Buat daftar tugas dulu." "$OUTDIR/s29-status-80-working.txt" | grep -q "38;5;255"; then
+  echo "PASS: s29/80: assistant reply renders in foreground #F5F5F5 (38;5;255)"; PASS=$((PASS+1))
+else
+  echo "FAIL: s29/80: assistant reply has no foreground color escape"; FAIL=$((FAIL+1))
+fi
+stop_tui
+# Narrow terminal: short "Step N" form, same alignment, no overflow.
+start_tui 40 15
+send "halo"
+send Enter
+sleep 0.5
+capture s29-status-40-thinking
+check_lead "$OUTDIR/s29-status-40-thinking.plain.txt" "thinking..." 2 "s29/40: indicator at 2 leading spaces on narrow terminal"
+check "$OUTDIR/s29-status-40-thinking.plain.txt" "Step 1" "s29/40: narrow form uses Step N"
+check "$OUTDIR/s29-status-40-thinking.plain.txt" "■ Esc" "s29/40: Esc hint survives on narrow terminal"
+check_absent "$OUTDIR/s29-status-40-thinking.plain.txt" "Agent step" "s29/40: no long Agent step form on narrow terminal"
+stop_tui
+unset MOCK_AGENT
+
+# s30 — timestamp placement (0.1.9 §4p, koreksi Reza atas §4l): NO blank
+# line — the [HH:MM] timestamp sits DIRECTLY above the "You:" body
+# (Freebuff message-block.tsx:187-194, root column has no gap), and
+# the green bar runs alongside the timestamp line too (Freebuff
+# message-with-agents.tsx:236-252, vertical line marginTop/bottom 0).
+# §4l's one blank line was "kejauhan" (too far); the pre-§4l floating
+# timestamp with no bar was "dempet". The bar makes the timestamp the
+# header of the bordered block.
+export MOCK_AGENT=1
+restart_mock 5000
+reset_credentials
+start_tui 80 24
+send "halo"
+send Enter
+sleep 0.5
+capture s30-ts-80-thinking
+ts_row=$(grep -n -m1 -E "^ +\[[0-9]{2}:[0-9]{2}\]" "$OUTDIR/s30-ts-80-thinking.plain.txt" | cut -d: -f1)
+you_row=$(row_of "$OUTDIR/s30-ts-80-thinking.plain.txt" "You: halo")
+if [ -n "$ts_row" ] && [ -n "$you_row" ] && [ "$you_row" = "$((ts_row + 1))" ]; then
+  echo "PASS: s30/80: You: is 1 row below timestamp (no blank line, Freebuff placement)"; PASS=$((PASS+1))
+else
+  echo "FAIL: s30/80: You: on row '${you_row:-none}', timestamp on row '${ts_row:-none}' (expected +1)"; FAIL=$((FAIL+1))
+fi
+ts_lead=$(sed -n "${ts_row}p" "$OUTDIR/s30-ts-80-thinking.plain.txt" | sed 's/[^ ].*//' | tr -d '\n' | wc -c)
+if [ "$ts_lead" = "4" ]; then
+  echo "PASS: s30/80: timestamp row has 4 leading spaces (root padding 1 + gutter 1 + bar 1 + space 1)"; PASS=$((PASS+1))
+else
+  echo "FAIL: s30/80: timestamp row has '${ts_lead:-none}' leading spaces (expected 4)"; FAIL=$((FAIL+1))
+fi
+stop_tui
+# Narrow terminal: same placement, no overflow.
+start_tui 40 15
+send "halo"
+send Enter
+sleep 0.5
+capture s30-ts-40-thinking
+ts_row=$(grep -n -m1 -E "^ +\[[0-9]{2}:[0-9]{2}\]" "$OUTDIR/s30-ts-40-thinking.plain.txt" | cut -d: -f1)
+you_row=$(row_of "$OUTDIR/s30-ts-40-thinking.plain.txt" "You: halo")
+if [ -n "$ts_row" ] && [ -n "$you_row" ] && [ "$you_row" = "$((ts_row + 1))" ]; then
+  echo "PASS: s30/40: You: is 1 row below timestamp on narrow terminal"; PASS=$((PASS+1))
+else
+  echo "FAIL: s30/40: You: on row '${you_row:-none}', timestamp on row '${ts_row:-none}' (expected +1)"; FAIL=$((FAIL+1))
+fi
+stop_tui
+unset MOCK_AGENT
+
+# s31 — tool-result wall (0.1.9 §4m): read_files on a 60-line file must
+# show only `Read big.txt` (Freebuff read-files.tsx: paths only, never
+# contents). Before the fix the block also showed a 120-char snippet of
+# the file contents; after the fix no content line reaches the screen,
+# while the model still gets the full file (unit test, agent.test.mjs).
+export MOCK_AGENT=1 MOCK_AGENT_BIG=1
+restart_mock 5000
+reset_credentials
+# Big file in the TUI's cwd (repo root): 60 lines, marker on line 42.
+# Created here, removed at the end of this scenario — never committed.
+for i in $(seq 1 60); do
+  if [ "$i" = 42 ]; then echo "MARKER_LINE_42_RAHASIA_DAPUR";
+  else printf 'BARIS BESAR %02d isi baris besar untuk tes tampilan tool\n' "$i"; fi;
+done > big.txt
+start_tui 80 24
+send "baca big.txt"
+send Enter
+sleep 13
+capture s31-toolwall-80
+check "$OUTDIR/s31-toolwall-80.plain.txt" "Read big.txt" "s31/80: read preview shows the path"
+check_absent "$OUTDIR/s31-toolwall-80.plain.txt" "BARIS BESAR 01" "s31/80: no content snippet of the big file (was 120 chars)"
+check_absent "$OUTDIR/s31-toolwall-80.plain.txt" "MARKER_LINE_42_RAHASIA_DAPUR" "s31/80: marker line 42 never reaches the screen"
+check "$OUTDIR/s31-toolwall-80.plain.txt" "Selesai" "s31/80: agent run completes"
+stop_tui
+# Narrow terminal: same, no overflow.
+# 0.1.9 §4o harness fix: the mock's agentReq is stateful per process —
+# the 80-col run above already consumed texts[0] (read) and texts[1]
+# (complete), so without a restart the 40-col run would get texts[1]
+# for its FIRST request (no read_files call, no "Read big.txt" preview
+# at all) and the check could never pass. Restart resets agentReq.
+restart_mock 5000
+start_tui 40 15
+send "baca big.txt"
+send Enter
+sleep 13
+capture s31-toolwall-40
+check "$OUTDIR/s31-toolwall-40.plain.txt" "Read big.txt" "s31/40: read preview shows the path on narrow terminal"
+check_absent "$OUTDIR/s31-toolwall-40.plain.txt" "BARIS BESAR 01" "s31/40: no content snippet on narrow terminal"
+check_absent "$OUTDIR/s31-toolwall-40.plain.txt" "MARKER_LINE_42_RAHASIA_DAPUR" "s31/40: marker line 42 never reaches the screen on narrow terminal"
+stop_tui
+rm -f big.txt
+unset MOCK_AGENT MOCK_AGENT_BIG
+
+# s32 — large-paste attachment (0.1.9 §4n): a >2000-char bracketed
+# paste becomes a compact card (title + type + line count), NOT
+# thousands of chars in the composer; the FULL content reaches the
+# agent as a [Pasted Text] block (verified via the mock capture
+# file, including a middle sentinel + a Unicode line). Short pastes
+# still go straight into the draft.
+export MOCK_ATTACHMENT=1 MOCK_CAPTURE_FILE="$OUTDIR/attachment-capture.jsonl"
+restart_mock
+rm -f "$OUTDIR/attachment-capture.jsonl"
+printf 'halo pendek' > "$OUTDIR/paste-short.txt"
+python3 - "$OUTDIR/paste-doc.md" <<'PYEOF'
+import sys
+lines = ["# LAPORAN LAMPIRAN", "", "Dokumen ini ditempel untuk menguji kartu lampiran.", ""]
+lines.append("SENTINEL_TENGAH_LAMPIRAN_12345 ada di tengah dokumen.")
+lines.append("Baris unicode: emoji \U0001f468\u200d\U0001f469\u200d\U0001f467 caf\u00e9 \u2014 \u201ckutip\u201d dan aksara \u65e5\u672c\u8a9e\u3002")
+for i in range(1, 61):
+    lines.append(f"BARIS LAMPIRAN {i:02d} isi baris lampiran untuk menguji paste panjang")
+open(sys.argv[1], "w", encoding="utf-8").write("\n".join(lines) + "\n")
+PYEOF
+start_tui 80 24
+# A. Short bracketed paste goes straight into the draft, no card.
+paste_bracketed "$OUTDIR/paste-short.txt"
+capture s32-short-paste
+check "$OUTDIR/s32-short-paste.plain.txt" "halo pendek" "s32: short paste lands in the draft"
+check_absent "$OUTDIR/s32-short-paste.plain.txt" "lampiran: Ctrl+E" "s32: short paste creates no attachment card"
+tmux send-keys -t "$SESSION" C-c; sleep 0.7
+# B. Long bracketed paste becomes a card; the content stays out of the composer.
+paste_bracketed "$OUTDIR/paste-doc.md"
+capture s32-card-80
+check "$OUTDIR/s32-card-80.plain.txt" "LAPORAN LAMPIRAN" "s32/80: card shows the doc title"
+check "$OUTDIR/s32-card-80.plain.txt" "Markdown · 66 baris" "s32/80: card shows type + line count"
+check_absent "$OUTDIR/s32-card-80.plain.txt" "BARIS LAMPIRAN 03" "s32/80: pasted content does NOT flood the composer"
+check "$OUTDIR/s32-card-80.plain.txt" "lampiran: Ctrl+E edit" "s32/80: footer shows edit/remove hints"
+# B2. Ctrl+X removes the card (nothing orphaned stays pending).
+tmux send-keys -t "$SESSION" C-x; sleep 0.7
+capture s32-removed
+check_absent "$OUTDIR/s32-removed.plain.txt" "Markdown · 66 baris" "s32/80: Ctrl+X removes the card"
+check_absent "$OUTDIR/s32-removed.plain.txt" "lampiran: Ctrl+E" "s32/80: hint disappears with the last card"
+# C. Ctrl+E expands the card back into the draft; sending it sends
+# the edited text inline (no [Pasted Text] marker — it is draft
+# text now), with the full content intact.
+paste_bracketed "$OUTDIR/paste-doc.md"
+tmux send-keys -t "$SESSION" C-e; sleep 0.7
+send Enter
+sleep 2
+capture s32-edit-send
+check "$OUTDIR/s32-edit-send.plain.txt" "Tidak ada lampiran yang diterima." "s32/80: edited text sends as plain draft (no attachment)"
+if tail -1 "$OUTDIR/attachment-capture.jsonl" | grep -q "SENTINEL_TENGAH_LAMPIRAN_12345"; then
+  echo "PASS: s32/80: edited send still carries the full content"; PASS=$((PASS+1))
+else
+  echo "FAIL: s32/80: edited send lost the pasted content"; FAIL=$((FAIL+1))
+fi
+if tail -1 "$OUTDIR/attachment-capture.jsonl" | grep -q "Pasted Text"; then
+  echo "FAIL: s32/80: edited send wrongly carries a [Pasted Text] block"; FAIL=$((FAIL+1))
+else
+  echo "PASS: s32/80: edited send has no [Pasted Text] block"; PASS=$((PASS+1))
+fi
+# D. Attachments-only send (empty draft + card): the agent receives
+# the whole attachment; the screen never shows the content.
+paste_bracketed "$OUTDIR/paste-doc.md"
+send Enter
+sleep 2
+capture s32-attach-send
+check "$OUTDIR/s32-attach-send.plain.txt" "Lampiran diterima:" "s32/80: agent confirms the attachment arrived"
+check "$OUTDIR/s32-attach-send.plain.txt" "66 baris" "s32/80: receipt states the line count"
+check "$OUTDIR/s32-attach-send.plain.txt" "📎 LAPORAN LAMPIRAN · Markdown · 66 baris" "s32/80: history shows the sent card line"
+check_absent "$OUTDIR/s32-attach-send.plain.txt" "BARIS LAMPIRAN 03" "s32/80: pasted content never renders on screen"
+if grep -q "SENTINEL_TENGAH_LAMPIRAN_12345" "$OUTDIR/attachment-capture.jsonl"; then
+  echo "PASS: s32/80: capture holds the middle sentinel (full content arrived)"; PASS=$((PASS+1))
+else
+  echo "FAIL: s32/80: middle sentinel missing from capture"; FAIL=$((FAIL+1))
+fi
+if grep -q $'caf\xc3\xa9 \xe2\x80\x94 \xe2\x80\x9ckutip\xe2\x80\x9d' "$OUTDIR/attachment-capture.jsonl"; then
+  echo "PASS: s32/80: Unicode line survived byte-identically"; PASS=$((PASS+1))
+else
+  echo "FAIL: s32/80: Unicode line mangled in capture"; FAIL=$((FAIL+1))
+fi
+if grep -q "Pasted Text" "$OUTDIR/attachment-capture.jsonl"; then
+  echo "PASS: s32/80: [Pasted Text] block present in the sent prompt"; PASS=$((PASS+1))
+else
+  echo "FAIL: s32/80: [Pasted Text] block missing from the sent prompt"; FAIL=$((FAIL+1))
+fi
+stop_tui
+# Narrow terminal: the card still fits, no overflow.
+start_tui 40 15
+paste_bracketed "$OUTDIR/paste-doc.md"
+capture s32-card-40
+check "$OUTDIR/s32-card-40.plain.txt" "LAPORAN LAMPIRAN" "s32/40: card title fits on narrow terminal"
+check "$OUTDIR/s32-card-40.plain.txt" "Markdown · 66 baris" "s32/40: card meta fits on narrow terminal"
+stop_tui
+unset MOCK_ATTACHMENT MOCK_CAPTURE_FILE
+
+# s33 — full viewport + composer height (0.1.9 §4o): conversation
+# top-anchored (Freebuff chat.tsx flex-start), composer 5 rows at rest
+# with the input vertically centered (chat-input-bar.tsx +
+# chat.tsx:2122-2123), box grows with multiline drafts, frame fills
+# the terminal at 80x24, 40x15 and 120x40.
+reset_credentials
+start_tui 80 24
+capture s33-welcome-80
+check_last_row "$OUTDIR/s33-welcome-80.plain.txt" "╭" 18 "s33/80: input top border on row 18 (5-row composer at rest)"
+check_last_row "$OUTDIR/s33-welcome-80.plain.txt" "╰" 22 "s33/80: input bottom border on row 22"
+check_row "$OUTDIR/s33-welcome-80.plain.txt" "Enter a coding task" 20 "s33/80: placeholder on the centered middle row 20"
+banner33=$(row_of "$OUTDIR/s33-welcome-80.plain.txt" "M   M")
+if [ "$banner33" = "2" ]; then
+  echo "PASS: s33/80: welcome banner top-anchored (row 2, no void above)"; PASS=$((PASS+1))
+else
+  echo "FAIL: s33/80: welcome banner not top-anchored (row '${banner33:-none}', expected 2)"; FAIL=$((FAIL+1))
+fi
+send "halo"
+send Enter
+sleep 1
+capture s33-chat-80
+ts33=$(grep -n -m1 -E "^ +\\[[0-9]{2}:[0-9]{2}\\]" "$OUTDIR/s33-chat-80.plain.txt" | cut -d: -f1)
+if [ "$ts33" = "2" ]; then
+  echo "PASS: s33/80: first message starts on row 2 (top-anchored, no void above)"; PASS=$((PASS+1))
+else
+  echo "FAIL: s33/80: first message on row '${ts33:-none}' (expected 2)"; FAIL=$((FAIL+1))
+fi
+you33=$(row_of "$OUTDIR/s33-chat-80.plain.txt" "You: halo")
+if [ "$you33" = "3" ]; then
+  echo "PASS: s33/80: You: on row 3 (timestamp directly above, §4p — no blank gap row)"; PASS=$((PASS+1))
+else
+  echo "FAIL: s33/80: You: on row '${you33:-none}' (expected 3)"; FAIL=$((FAIL+1))
+fi
+check_last_row "$OUTDIR/s33-chat-80.plain.txt" "╰" 22 "s33/80: input bottom border stays on row 22 after a message"
+check_last_row "$OUTDIR/s33-chat-80.plain.txt" "╭" 18 "s33/80: composer stays 5 rows after a message"
+# Multiline draft: 300 chars wrap to 5 content rows, the box grows
+# 5 -> 7 rows (top border moves up 18 -> 16, bottom stays 22).
+send "$(python3 -c "print('a'*100)")"
+send "$(python3 -c "print('a'*100)")"
+send "$(python3 -c "print('a'*100)")"
+sleep 0.5
+capture s33-multiline-80
+check_last_row "$OUTDIR/s33-multiline-80.plain.txt" "╭" 16 "s33/80: input top border moves to row 16 with a 5-row draft (7-row box)"
+check_last_row "$OUTDIR/s33-multiline-80.plain.txt" "╰" 22 "s33/80: input bottom border stays on row 22 with a long draft"
+check_row "$OUTDIR/s33-multiline-80.plain.txt" "Ctrl+C 2x keluar" 24 "s33/80: footer stays on the last row with a long draft"
+# Ctrl+C clears the draft (priority 3) and the composer returns to 5 rows.
+send C-c
+sleep 0.5
+capture s33-cleared-80
+check_last_row "$OUTDIR/s33-cleared-80.plain.txt" "╭" 18 "s33/80: composer back to 5 rows after Ctrl+C clears the draft"
+check_row "$OUTDIR/s33-cleared-80.plain.txt" "Enter a coding task" 20 "s33/80: placeholder back on the centered row 20"
+stop_tui
+# Narrow terminal: placeholder wraps to 2 rows, so the composer is NOT
+# centered — box is 4 rows (2 borders + 2 content rows).
+start_tui 40 15
+capture s33-welcome-40
+check_last_row "$OUTDIR/s33-welcome-40.plain.txt" "╰" 13 "s33/40: input bottom border on row 13"
+check_last_row "$OUTDIR/s33-welcome-40.plain.txt" "╭" 10 "s33/40: input top border on row 10 (4-row box, placeholder wraps to 2)"
+check_row "$OUTDIR/s33-welcome-40.plain.txt" "Enter a coding task" 11 "s33/40: placeholder first row on row 11"
+stop_tui
+# Tall desktop terminal: frame fills 120x40, banner top-anchored,
+# composer still 5 rows at rest, footer on the last row.
+start_tui 120 40
+capture s33-welcome-120
+check_last_row "$OUTDIR/s33-welcome-120.plain.txt" "╰" 38 "s33/120: input bottom border on row 38"
+check_last_row "$OUTDIR/s33-welcome-120.plain.txt" "╭" 34 "s33/120: input top border on row 34 (5-row composer)"
+check_row "$OUTDIR/s33-welcome-120.plain.txt" "Enter a coding task" 36 "s33/120: placeholder on the centered row 36"
+check_row "$OUTDIR/s33-welcome-120.plain.txt" "Ctrl+C 2x keluar" 40 "s33/120: footer on the last row 40"
+banner33b=$(row_of "$OUTDIR/s33-welcome-120.plain.txt" "M   M")
+if [ "$banner33b" = "2" ]; then
+  echo "PASS: s33/120: welcome banner top-anchored (row 2) at 120x40"; PASS=$((PASS+1))
+else
+  echo "FAIL: s33/120: welcome banner not top-anchored (row '${banner33b:-none}', expected 2)"; FAIL=$((FAIL+1))
+fi
+stop_tui
+
+# --- Scenario 34: no scrollbar (0.1.9 §4q, Reza's order) — the track/thumb
+# column is gone, the scroll FUNCTION is untouched: PgUp/PgDn, wheel,
+# indicator and footer affordance all still work; no message-area row
+# may end with │ or █ (check_no_track), and the thumb char █ appears
+# nowhere in the capture.
+start_tui 80 24
+for i in $(seq 1 30); do
+  send "pesan $(printf %02d $i)" Enter
+done
+sleep 1
+capture s34-noscroll-80-bottom
+check_absent "$OUTDIR/s34-noscroll-80-bottom.plain.txt" "█" "s34/80: no scrollbar thumb at the bottom while history overflows"
+check_no_track "$OUTDIR/s34-noscroll-80-bottom.plain.txt" "s34/80: no scrollbar track at the right edge at the bottom"
+send PageUp
+sleep 0.3
+capture s34-noscroll-80-up
+check "$OUTDIR/s34-noscroll-80-up.plain.txt" "baris di atas" "s34/80: scroll indicator shown while scrolled up (function kept)"
+check "$OUTDIR/s34-noscroll-80-up.plain.txt" "↓ PgDn" "s34/80: scroll-to-bottom affordance in the footer while scrolled up"
+check_absent "$OUTDIR/s34-noscroll-80-up.plain.txt" "█" "s34/80: no scrollbar thumb while scrolled up"
+check_no_track "$OUTDIR/s34-noscroll-80-up.plain.txt" "s34/80: no scrollbar track at the right edge while scrolled up"
+wheel up 10
+sleep 0.3
+capture s34-noscroll-80-wheel
+check "$OUTDIR/s34-noscroll-80-wheel.plain.txt" "baris di atas" "s34/80: wheel still scrolls without a scrollbar"
+check_absent "$OUTDIR/s34-noscroll-80-wheel.plain.txt" "█" "s34/80: no scrollbar thumb after wheel"
+check_no_track "$OUTDIR/s34-noscroll-80-wheel.plain.txt" "s34/80: no scrollbar track at the right edge after wheel"
+stop_tui
+start_tui 40 15
+for i in $(seq 1 30); do
+  send "pesan $(printf %02d $i)" Enter
+done
+sleep 1
+send PageUp
+sleep 0.3
+capture s34-noscroll-40-up
+check "$OUTDIR/s34-noscroll-40-up.plain.txt" "baris di atas" "s34/40: scroll indicator shown while scrolled up on a narrow terminal"
+check_absent "$OUTDIR/s34-noscroll-40-up.plain.txt" "█" "s34/40: no scrollbar thumb on a narrow terminal"
+check_no_track "$OUTDIR/s34-noscroll-40-up.plain.txt" "s34/40: no scrollbar track at the right edge on a narrow terminal"
+stop_tui
 
 echo ""
 echo "PTY results: PASS=$PASS FAIL=$FAIL (captures in $OUTDIR)"

@@ -19,11 +19,12 @@ import {
   paletteMaxRowsFor,
   paletteRenderedRows,
   welcomeLayout,
+  composerIsCentered,
+  COMPOSER_CENTERED_CONTENT_ROWS,
   windowLines,
   pageScrollOffset,
   wheelScrollOffset,
   easeOutCubic,
-  scrollbarThumbRange,
   SIDE_GUTTER,
   SCROLL_ANIMATION_DURATION_MS,
   SCROLL_ANIMATION_FRAME_MS,
@@ -140,7 +141,13 @@ test("flattenMessages: timestamp [HH:MM] above a message + inline Markdown", () 
     40,
   );
   const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
-  assert.ok(texts[0].match(/^ \[\d\d:\d\d\]$/), `timestamp line: ${texts[0]}`);
+  assert.ok(texts[0].match(/^   \[\d\d:\d\d\]$/), `timestamp line: ${texts[0]}`);
+  // §4p (koreksi Reza: §4l "kejauhan"): NO blank line — Freebuff
+  // message-block.tsx:187-194 has no gap, the timestamp sits directly
+  // above the text. The bar runs alongside the timestamp line too
+  // (message-with-agents.tsx:236-252, marginTop/bottom 0), so the
+  // timestamp is the header of the bordered block, not a floating line.
+  assert.equal(texts[1], "   You: hi");
   assert.ok(texts.includes("   You: hi"));
   const boldLine = lines.find((l) => l.segments.some((s) => s.bold === true && s.text === "bold"));
   assert.ok(boldLine, "inline **bold** becomes a bold segment");
@@ -151,6 +158,32 @@ test("flattenMessages: timestamp [HH:MM] above a message + inline Markdown", () 
   assert.equal(codeSeg.color, "#FF8534");
   assert.equal(codeSeg.backgroundColor, "#374151");
   assert.equal(codeSeg.bold, true);
+});
+
+test("flattenMessages: timestamp directly above You:, bar spans the timestamp line (Freebuff)", () => {
+  // §4p: a user message WITH a timestamp renders [HH:MM] DIRECTLY
+  // above the "You:" body (no blank line — Freebuff message-block
+  // root has no gap), and the green bar runs alongside the timestamp
+  // line too (Freebuff message-with-agents vertical line, marginTop
+  // 0 / marginBottom 0). A user message WITHOUT a timestamp renders
+  // the body directly (no leading blank line added).
+  const withTs = flattenMessages(
+    [{ role: "user", content: "halo", kind: "chat", ts: Date.UTC(2026, 10, 8, 12, 34) }],
+    40,
+  );
+  const withTsTexts = withTs.map((l) => l.segments.map((s) => s.text).join(""));
+  assert.ok(withTsTexts[0].match(/^   \[\d\d:\d\d\]$/), `timestamp line: ${withTsTexts[0]}`);
+  assert.deepEqual(withTsTexts.slice(1), ["   You: halo", "  "]);
+  // Bar on the timestamp line: gutter, then the green-background bar
+  // space, then a space, then the timestamp text.
+  const tsSegs = withTs[0].segments;
+  assert.equal(tsSegs[0].text, " ");
+  assert.equal(tsSegs[1].backgroundColor, theme.userLine);
+  assert.equal(tsSegs[1].text, " ");
+  assert.ok(/^\[\d\d:\d\d\]$/.test(tsSegs[3].text), `timestamp text: ${tsSegs[3].text}`);
+  const noTs = flattenMessages([{ role: "user", content: "halo", kind: "chat" }], 40);
+  const noTsTexts = noTs.map((l) => l.segments.map((s) => s.text).join(""));
+  assert.deepEqual(noTsTexts, ["   You: halo", "  "]);
 });
 
 test("flattenMessages: heading is yellow + bold, link is blue (Freebuff palette)", () => {
@@ -166,6 +199,38 @@ test("flattenMessages: heading is yellow + bold, link is blue (Freebuff palette)
   const link = segs.find((s) => s.text === "docs");
   assert.ok(link, "link text renders without the URL");
   assert.equal(link.color, "#3B82F6");
+});
+
+test("flattenMessages: assistant plain paragraph is foreground, not terminal default (Freebuff message-block textColor)", () => {
+  // Root cause of the gray reply: renderMarkdownText passed no baseColor,
+  // so plain paragraphs carried NO color and Ink fell back to the terminal
+  // default foreground (gray on Reza's Termux). Freebuff threads
+  // textColor ?? theme.foreground into its blocks renderer instead.
+  const lines = flattenMessages(
+    [{ role: "assistant", content: "Halo! Saya GLM, model bahasa besar.\n\nParagraf kedua tetap jelas.", kind: "chat" }],
+    40,
+  );
+  const segs = lines.flatMap((l) => l.segments);
+  const plain = segs.find((s) => s.text === "Halo! Saya GLM, model bahasa besar.");
+  assert.ok(plain, "plain paragraph renders");
+  assert.equal(plain.color, theme.text, "main reply uses the foreground token");
+  const plain2 = segs.find((s) => s.text === "Paragraf kedua tetap jelas.");
+  assert.ok(plain2, "second paragraph renders");
+  assert.equal(plain2.color, theme.text);
+  // Semantic colors are untouched: bold keeps foreground + bold, inline
+  // code keeps orange, blockquote keeps its own text color.
+  const boldLines = flattenMessages(
+    [{ role: "assistant", content: "Cek **panduan** dan `npm test` dulu.\n\n> catatan penting", kind: "chat" }],
+    40,
+  );
+  const boldSegs = boldLines.flatMap((l) => l.segments);
+  const bold = boldSegs.find((s) => s.text === "panduan");
+  assert.equal(bold.color, theme.text);
+  assert.equal(bold.bold, true);
+  const code = boldSegs.find((s) => s.text === " npm test ");
+  assert.equal(code.color, "#FF8534");
+  const quote = boldSegs.find((s) => s.text === "catatan penting");
+  assert.equal(quote.color, markdown.blockquoteTextFg);
 });
 
 test("flattenMessages: code block is Freebuff monochrome on gray + // lang header", () => {
@@ -492,6 +557,59 @@ test("welcomeLayout: paid model shows price, unknown balance shows dash", () => 
   assert.ok(!text.includes("FREE $0.00"));
 });
 
+test("welcomeLayout: top-anchored (0.1.9 §4o, Freebuff chat.tsx flex-start)", () => {
+  // Tall terminal: the welcome content starts on the FIRST row of the
+  // message area and the slack sits below it — never a void above the
+  // wordmark. Before the fix the block was vertically centered.
+  const w = welcomeLayout({
+    available: 36,
+    contentWidth: 116,
+    model: "glm-5.3-flash",
+    free: true,
+    priceText: null,
+    balanceUsd: 0.4855,
+  });
+  assert.equal(w.rows.length, 36, "welcome must fill exactly the message budget");
+  const lines = w.rows.map((l) => l.segments.map((s) => s.text).join(""));
+  assert.ok(lines[0].includes("M   M"), "first row is the wordmark banner, not a blank pad");
+  assert.ok(lines[lines.length - 1].trim() === "", "slack sits below the content");
+  const firstBlank = lines.findIndex((l) => l.trim() === "");
+  assert.equal(firstBlank, 5, "first blank is the banner/info-box separator inside the content, not a top pad");
+  assert.ok(lines.join("\n").includes("Pesan pertama memulai sesi."), "info box follows below the banner");
+});
+
+test("welcomeLayout: banner content fits the 80x24 message area (0.1.9 §4o)", () => {
+  // With the 5-row centered composer the message area at 80x24 is
+  // 16 rows (24 - 1 header - 5 input - 2 footer). The banner content
+  // must be <= 16 rows so the hint row (Type /model ... /models ...)
+  // is never sliced off the bottom — that exact clip failed s13 once.
+  const w = welcomeLayout({
+    available: 16,
+    contentWidth: 76,
+    model: "glm-5.3-flash",
+    free: true,
+    priceText: null,
+    balanceUsd: 0.4855,
+  });
+  assert.equal(w.rows.length, 16, "welcome must fill exactly the message budget");
+  const text = w.rows.map((l) => l.segments.map((s) => s.text).join("")).join("\n");
+  assert.ok(text.includes("/models"), "hint row with /models survives at 80x24");
+  assert.ok(text.includes("Try:"), "starters label survives at 80x24");
+});
+
+test("composerIsCentered: Freebuff rest height (chat.tsx:2122-2123)", () => {
+  assert.equal(composerIsCentered(1, false), true, "single-line draft, palette closed -> centered");
+  assert.equal(composerIsCentered(0, false), true, "empty draft counts as single-line");
+  assert.equal(composerIsCentered(2, false), false, "multiline draft hugs content");
+  assert.equal(composerIsCentered(1, true), false, "palette open hugs content");
+  assert.equal(COMPOSER_CENTERED_CONTENT_ROWS, 3, "centered content area is 3 rows");
+  assert.equal(
+    inputBoxRowsFor(COMPOSER_CENTERED_CONTENT_ROWS, 0),
+    5,
+    "bordered composer is 5 rows tall at rest (3 content + 2 borders)",
+  );
+});
+
 test("welcomeLayout: tiny terminal degrades without breaking the budget", () => {
   for (const avail of [6, 3, 1, 0]) {
     const w = welcomeLayout({
@@ -525,17 +643,11 @@ test("easeOutCubic: Freebuff's scroll easing (0 -> 0, 1 -> 1, fast start)", () =
   assert.equal(SCROLL_ANIMATION_FRAME_MS, 16);
 });
 
-test("scrollbarThumbRange: proportional thumb, at least one row, empty without overflow", () => {
-  assert.deepEqual(scrollbarThumbRange(5, 10, 0, 5), { start: 0, end: 0 }); // fits
-  const top = scrollbarThumbRange(100, 10, 0, 10);
-  assert.equal(top.start, 0);
-  assert.ok(top.end >= 1);
-  const mid = scrollbarThumbRange(100, 10, 45, 55);
-  assert.ok(mid.start > 0 && mid.end > mid.start);
-  const bottom = scrollbarThumbRange(100, 10, 90, 100);
-  assert.equal(bottom.end, 10);
-  assert.ok(bottom.start < bottom.end);
-});
+// 0.1.9 §4q: the scrollbar is removed (Reza's order) —
+// scrollbarThumbRange is deleted with it, so its test goes too.
+// The scroll FUNCTION (offset, wheel, PgUp/PgDn, auto-scroll,
+// easeOutCubic) is untouched and covered by the scroll tests below
+// and the PTY scenarios (s10/s28/s33).
 
 // ---------------------------------------------------------------------------
 // Horizontal gutter (0.1.8): Freebuff message-with-agents.tsx:105
@@ -566,7 +678,7 @@ test("flattenMessages: every line starts with exactly the SIDE_GUTTER prefix", (
   assert.ok(texts.some((t) => t.startsWith(" ┌")), "table top border starts after the gutter");
   assert.ok(texts.some((t) => /^ ─+$/.test(t)), "divider starts after the gutter");
   assert.ok(texts.some((t) => t.startsWith("   You: ")), "user line is gutter + bar + space");
-  assert.ok(texts.some((t) => t.startsWith(" [")), "timestamp starts after the gutter");
+  assert.ok(texts.some((t) => t.startsWith("   [")), "timestamp is gutter + bar + space, like the You: line");
   // The gutter is a plain segment (no color), so it never changes the
   // palette — colors live on the content segments after it.
   assert.ok(lines.every((l) => l.segments[0].text === " " && l.segments[0].color === undefined));

@@ -30,12 +30,12 @@
 // The agent loop IS the chat (Freebuff: no plain-chat mode — every
 // message runs through the agent step with tools).
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import fs from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout, type Key } from "ink";
 import { theme } from "../theme.js";
-import { streamChat, ApiError, type ChatMessage, type ChatUsage } from "../api.js";
+import { ApiError, type ChatMessage, type ChatUsage } from "../api.js";
 import {
   runAgentLoop,
   cycleMode,
@@ -45,6 +45,10 @@ import {
   generateInitSummary,
   compactPrompt,
   exportConversation,
+  collectChatText,
+  createDefaultAdapter,
+  collectSessionSecrets,
+  createRedactor,
   type AgentEvent,
   type AgentMode,
   type TodoItem,
@@ -59,18 +63,20 @@ import {
   TOKEN_PAGE_URL,
   LOGIN_URL,
 } from "../config.js";
-import { phaseLabel, formatElapsedTime } from "./thinking.js";
+import { phaseLabel, statusRightItems } from "./thinking.js";
+import { summarizeToolResult } from "./tool-summary.js";
 import { sanitizeTerminalOutput, sanitizeTerminalText } from "./terminal-safe.js";
 import {
   AUTO_SCROLL_DELAY_MS,
   SCROLL_ANIMATION_DURATION_MS,
   SCROLL_ANIMATION_FRAME_MS,
   easeOutCubic,
-  scrollbarThumbRange,
   INPUT_PLACEHOLDER,
   SIDE_GUTTER,
   breakpoints,
   flattenMessages,
+  composerIsCentered,
+  COMPOSER_CENTERED_CONTENT_ROWS,
   inputBoxRowsFor,
   layoutBudget,
   pageScrollOffset,
@@ -87,6 +93,17 @@ import {
 import { filterCommands, paletteClampIndex, paletteNextIndex, palettePrevIndex } from "./palette.js";
 import { flattenGroups, groupCatalog, isLocked, lockedExplanation, pickerNext, pickerPrev } from "./picker.js";
 import { parseMouseInput, WHEEL_LINES } from "./mouse.js";
+import {
+  createTextAttachment,
+  buildSendContent,
+  truncateEnd,
+  attachmentMetaLine,
+  toSentMeta,
+  LONG_TEXT_THRESHOLD,
+  type PendingTextAttachment,
+  type SentAttachmentMeta,
+} from "./attachments.js";
+import { createPasteAssembler, stripAnsi } from "./paste.js";
 import { parseSlashContext, suggestionMaxVisible } from "./suggestions.js";
 import {
   EXIT_WARNING_TIMEOUT_MS,
@@ -118,6 +135,14 @@ type DisplayMessage = ChatMessage & {
     shell: boolean;
     results: { ok: boolean; text: string }[];
   };
+  /**
+   * Attachments sent with this user message (compact metadata only —
+   * the full content lives in the agent history). The layout renders
+   * one `📎 title · Type · N baris` line per attachment under the
+   * user block (Freebuff message-block.tsx renders its
+   * textAttachments as cards under the message).
+   */
+  attachments?: SentAttachmentMeta[];
 };
 
 interface ChatAppProps {
@@ -178,10 +203,12 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
   // of the wrap width — flattenMessages prepends the gutter to every
   // line, so text starts at column 2 (root padding 1 + gutter 1) and
   // its right edge stays exactly where it was (the spare column in
-  // contentWidth is the right-side gutter). The scrollbar pass takes
-  // one more column for the track, as before. Narrow terminals stay
-  // safe: contentWidth floors at 20, so messageWidth never drops
-  // below 19 — no static padding number can break a small terminal.
+  // contentWidth is the right-side gutter). 0.1.9 §4q: the scrollbar
+  // is gone (Reza's order — no track/thumb column at the right edge),
+  // so lines always wrap at the full messageWidth; no column is
+  // reserved for a track anymore. Narrow terminals stay safe:
+  // contentWidth floors at 20, so messageWidth never drops below 19
+  // — no static padding number can break a small terminal.
   const messageWidth = contentWidth - SIDE_GUTTER;
   // Freebuff-style breakpoints (layout.ts): width xs < 50, sm 50-100,
   // md 100-150, lg > 150; height xs < 20, sm 20-40, md > 40. The header
@@ -190,6 +217,12 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
   const narrow = bp.width === "xs";
 
   const [model, setModel] = useState(initialModel);
+  // Fase 8: redact session secrets from anything model-generated
+  // that reaches the screen (assistant text, thinking, errors,
+  // /compact summary). The loop already redacts its own events;
+  // this is the display-side whole-message pass — it catches a
+  // secret that arrived split across two stream deltas.
+  const redact = useMemo(() => createRedactor(collectSessionSecrets(apiKey)), [apiKey]);
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -339,6 +372,23 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
     inputRef.current = next;
     setInput(next);
   };
+  // Pending large-paste text attachments (Freebuff
+  // PendingTextAttachment, see ./attachments.ts): cards shown above
+  // the input box, content sent with the next message. Same ref +
+  // state mirroring as the draft, for the same reason.
+  const [attachments, setAttachments] = useState<PendingTextAttachment[]>([]);
+  const attachmentsRef = useRef<PendingTextAttachment[]>([]);
+  const setAttachmentsBoth = (
+    updater: PendingTextAttachment[] | ((prev: PendingTextAttachment[]) => PendingTextAttachment[]),
+  ) => {
+    const next = typeof updater === "function" ? updater(attachmentsRef.current) : updater;
+    attachmentsRef.current = next;
+    setAttachments(next);
+  };
+  // Bracketed-paste assembler (see ./paste.ts): one instance per
+  // chat session, kept in a ref because useInput must see the
+  // accumulated state across deliveries.
+  const pasteAssemblerRef = useRef(createPasteAssembler());
   const setPickerOpenBoth = (open: boolean) => {
     pickerOpenRef.current = open;
     setPickerOpen(open);
@@ -383,19 +433,31 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
   // Status phase (Freebuff status-bar.tsx): "thinking..." while
   // waiting for the first delta, "working..." once streaming. The
   // elapsed timer (formatElapsedTime) is hidden while it is 0, and
-  // the stop hint is exactly "■ Esc" — both sit on the RIGHT of the
-  // status row (Freebuff status bar: indicator left, timer + ■ Esc
-  // right, justifyContent flex-end). The row shows for the whole
+  // the stop hint is exactly "■ Esc". The row shows for the whole
   // request, not just while waiting.
+  //
+  // Layout is Freebuff's status bar (status-bar.tsx): the bar's own
+  // root box carries paddingLeft/Right 1 — the scrollbox content
+  // carries the same paddingLeft 1, so the indicator lands on the
+  // SAME column as the message text (col 3 here: root paddingX 1 +
+  // bar padding 1, matching root paddingX 1 + SIDE_GUTTER 1). The
+  // bar is two flex zones: the indicator left, the right cluster
+  // (Agent step + timer + ■ Esc) right-aligned with gap 1 between
+  // items, the Esc button in its own padded cell (StatusActionButton:
+  // paddingLeft/Right 1). Timer and Esc render in theme.secondary,
+  // like Freebuff — never one " · "-joined muted string.
   const statusActive = sending && error === null;
   const statusLabel = statusActive ? phaseLabel(gotFirstDelta ? "streaming" : "waiting") : null;
-  const statusRightParts: string[] = [];
-  if (agentRunning) {
-    statusRightParts.push(narrow ? `Step ${agentSteps}` : `Agent step ${agentSteps}`);
-  }
-  if (elapsedSec > 0) statusRightParts.push(formatElapsedTime(elapsedSec));
-  statusRightParts.push("■ Esc");
-  const statusRightText = statusRightParts.join(" · ");
+  const statusRight = statusRightItems({
+    showStep: agentRunning,
+    agentSteps,
+    elapsedSec,
+    narrow,
+    // Row content width: root paddingX 1 + status-bar padding 1,
+    // each side (the cascade in statusRightItems fits the cluster
+    // to this width, dropping the timer, then the step).
+    availableWidth: columns - 4,
+  });
 
   // Resize re-render (Ink 6 quirk, root-caused live 2026-11-08):
   // Ink's own resize handler (ink/build/ink.js `resized()`) only
@@ -456,6 +518,11 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
   // the box above the input); its height is 2 borders + the wrapped
   // input/placeholder rows (maxHeight = floor(rows / 2),
   // chat-input-bar.tsx) + the palette rows when the menu is open.
+  // 0.1.9 §4o: at rest the composer content area is 3 rows with the
+  // input vertically centered (chat.tsx:2122-2123
+  // shouldCenterInputVertically), so the box is 5 rows tall, not 3.
+  // The EFFECTIVE content rows feed the budget, so the picker/palette
+  // budgets shrink by exactly the 2 extra rows.
   const headerRows = narrow ? 2 : 1;
   const inputInnerWidth = Math.max(10, contentWidth - 4);
   const displayInput = input === "" ? INPUT_PLACEHOLDER : input;
@@ -463,13 +530,17 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
     1,
     Math.min(Math.floor(rows / 2), wrapLineCount(displayInput, inputInnerWidth)),
   );
+  const centerInput = composerIsCentered(inputContentRows, paletteOpen);
+  const effectiveInputContentRows = centerInput
+    ? COMPOSER_CENTERED_CONTENT_ROWS
+    : inputContentRows;
   const footerRows = 2;
   // The exit warning reuses the status row's budget slot (Freebuff
   // status bar is one fixed row; the ctrlC warning has the highest
   // status-indicator priority, above waiting/streaming).
   const thinkingRows = statusActive || exitWarning ? 1 : 0;
   const errorRows = error ? wrapLineCount(error, contentWidth) : 0;
-  const inputBoxBaseRows = 2 + inputContentRows;
+  const inputBoxBaseRows = 2 + effectiveInputContentRows;
   const fixedExcludingOverlays = headerRows + inputBoxBaseRows + footerRows + thinkingRows + errorRows;
   const pickerMaxRows = pickerOpen ? pickerMaxRowsFor(rows, fixedExcludingOverlays) : 0;
   const pickerRows = pickerOpen
@@ -487,7 +558,7 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
           maxWidth: inputInnerWidth,
         })
       : 0;
-  const inputBoxRows = inputBoxRowsFor(inputContentRows, paletteRowsInside);
+  const inputBoxRows = inputBoxRowsFor(effectiveInputContentRows, paletteRowsInside);
   const { available: messageAvailable } = layoutBudget({
     rows,
     headerRows,
@@ -522,17 +593,18 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
         showStarters: startersShown,
       })
     : null;
-  // Vertical scrollbar (Freebuff scrollbox: 1-wide track, visible
-  // only when not streaming/waiting and the content overflows). Ink
-  // has no scrollbox, so the track is a trailing column on every
-  // message-area row; lines are re-wrapped one column narrower while
-  // it shows, so no text is ever pushed out of the viewport.
-  const flatLinesFull = flattenMessages(messages, messageWidth, { thinkingExpanded });
-  const showScrollbar =
-    !showWelcome && !sending && flatLinesFull.length > messageAvailable;
-  const flatLines = showScrollbar
-    ? flattenMessages(messages, messageWidth - 1, { thinkingExpanded })
-    : flatLinesFull;
+  // No scrollbar (0.1.9 §4q, Reza's order): Freebuff's scrollbox
+  // hides its own scrollbar too (chat.tsx:2246 scrollbarOptions
+  // visible: false), and MethaTech used to draw a 1-wide track
+  // (│/█) as a trailing column on every message-area row while
+  // re-wrapping lines one column narrower. That column is gone:
+  // lines always wrap at the full messageWidth, so the reclaimed
+  // column goes back to the text (dividers run one column wider
+  // while history overflows). The scroll FUNCTION is untouched —
+  // scrollOffset, wheel, PgUp/PgDn, auto-scroll, easeOutCubic,
+  // and the footer scroll affordances all work exactly as before;
+  // only the visible track/thumb is removed.
+  const flatLines = flattenMessages(messages, messageWidth, { thinkingExpanded });
   let linesBudget = messageAvailable;
   let windowed = windowLines(flatLines, linesBudget, scrollOffset);
   // The "↑ N baris di atas" row only shows while the user is actually
@@ -547,13 +619,9 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
     linesBudget -= 1;
     windowed = windowLines(flatLines, linesBudget, scrollOffset);
   }
-  // Thumb range over the message-area rows (proportional to the
-  // visible window's share of the whole history).
-  const scrollbarThumb = showScrollbar
-    ? scrollbarThumbRange(flatLines.length, messageAvailable, windowed.startLine, windowed.endLine)
-    : { start: 0, end: 0 };
-  const scrollbarChar = (rowIndex: number) =>
-    rowIndex >= scrollbarThumb.start && rowIndex < scrollbarThumb.end ? "█" : "│";
+  // The scroll FUNCTION is unchanged (scrollOffset, wheel, PgUp/PgDn,
+  // auto-scroll, animation) — only the visible scrollbar is gone
+  // (§4q), so there is no thumb range to compute anymore.
   // Explicit black filler rows: Ink only paints cells it renders, so
   // the empty part of the viewport is painted with spaces on black
   // instead of showing the terminal's own background (teal on Reza's
@@ -605,13 +673,23 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
   // Ink has no mouse click, so PgDn is the way down and the `↓` marks
   // it. Parts are dropped from the end (hint first, then usage) so
   // the scroll affordance always survives on narrow terminals.
+  // Fase 7: the usage part (turn total, fed by the agent loop)
+  // shares this line with the hint. The full hint + usage no
+  // longer fit at 80 cols, and the drop cascade would shed the
+  // hint — including the "Ctrl+C 2x keluar" exit hint. So when
+  // usage is present, the hint shortens to the compact variant if
+  // the full one does not fit alongside it; the compact hint keeps
+  // every key (history, help, exit).
+  const fullHintText = "↑↓ history · ? help · / perintah · /model pilih model · Ctrl+C 2x keluar";
+  const shortHintText = "↑↓ history · ? help · Ctrl+C 2x keluar";
+  const usageText = lastUsage ? formatUsageLine(lastUsage.usage, priceFor(catalog, lastUsage.model)) : null;
   const hintText =
-    contentWidth >= 72
-      ? "↑↓ history · ? help · / perintah · /model pilih model · Ctrl+C 2x keluar"
-      : "↑↓ history · ? help · Ctrl+C 2x keluar";
+    contentWidth >= 72 && (!usageText || usageText.length + 3 + fullHintText.length <= columns - 2)
+      ? fullHintText
+      : shortHintText;
   const statusParts: { text: string; color?: string }[] = [];
-  if (lastUsage) {
-    statusParts.push({ text: formatUsageLine(lastUsage.usage, priceFor(catalog, lastUsage.model)) });
+  if (usageText) {
+    statusParts.push({ text: usageText });
   }
   if (windowed.hiddenBelow > 0) {
     statusParts.push({
@@ -620,6 +698,12 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
         : `↓ PgDn ke bawah (${windowed.hiddenBelow} baris)`,
       color: theme.secondary,
     });
+  }
+  // Attachment hint (only while cards are pending): Ctrl+E edits /
+  // Ctrl+X removes the most recent card. Inserted before the hint
+  // part so the drop-from-the-end cascade sheds the hint first.
+  if (attachments.length > 0) {
+    statusParts.push({ text: "lampiran: Ctrl+E edit · Ctrl+X hapus", color: theme.secondary });
   }
   statusParts.push({ text: hintText });
   const statusPartsShown = [...statusParts];
@@ -770,6 +854,16 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
       history persists across turns in this session. */
   const send = async (text: string) => {
     if (sendingRef.current) return;
+    // Capture pending attachments (Freebuff
+    // capturePendingAttachments): the draft + every attachment, in
+    // paste order, become the single user prompt the agent sees
+    // (buildSendContent — `[Pasted Text]` blocks with the FULL
+    // content). The user message in the history keeps the draft
+    // text + compact card metadata; the full attachment content
+    // lives in the agent history (loop.ts stores userPrompt).
+    const pendingAttachments = attachmentsRef.current;
+    const finalContent = buildSendContent(text, pendingAttachments);
+    if (finalContent.trim().length === 0) return;
     const currentModel = modelRef.current;
     if (!isFreeModel(currentModel) && balanceUsd !== null && balanceUsd <= 0) {
       const entry = catalog.entries.find((e) => e.id === currentModel);
@@ -786,7 +880,7 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
       setStartersShown(false);
       markFirstPromptSubmitted();
     }
-    historyRef.current = [...historyRef.current, text];
+    historyRef.current = text ? [...historyRef.current, text] : historyRef.current;
     historyIdxRef.current = -1;
     lastEditDueToNavRef.current = false;
     sendingRef.current = true;
@@ -800,7 +894,11 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
     setError(null);
     setScrollOffsetBoth(0);
     const now = Date.now();
-    setMessages((m) => [...m, { role: "user", content: text, kind: "chat", ts: now }]);
+    setMessages((m) => [...m, { role: "user", content: text, kind: "chat", ts: now, attachments: pendingAttachments.map(toSentMeta) }]);
+    // The cards are consumed by this send (Freebuff clears pending
+    // attachments in prepareUserMessage) — a later message starts
+    // with no cards, and a re-send never duplicates the content.
+    setAttachmentsBoth([]);
     setMessages((m) => [...m, { role: "assistant", content: "", kind: "chat", ts: now, thinking: "" }]);
     const abort = new AbortController();
     abortRef.current = abort;
@@ -813,9 +911,11 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
         model: currentModel,
         cwd: process.cwd(),
         mode: agentModeRef.current,
-        userPrompt: text,
+        userPrompt: finalContent,
         history: priorHistory,
         signal: abort.signal,
+        // Fase 8: audit-log every tool call of this turn.
+        audit: true,
         onEvent: (e: AgentEvent) => {
           if (e.type === "text") {
             setGotFirstDelta(true);
@@ -830,7 +930,7 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
               for (let i = copy.length - 1; i >= 0; i--) {
                 const msg = copy[i];
                 if (msg && msg.role === "assistant" && msg.kind === "chat") {
-                  copy[i] = { ...msg, thinking: (msg.thinking ?? "") + e.text };
+                  copy[i] = { ...msg, thinking: (msg.thinking ?? "") + redact(e.text) };
                   break;
                 }
               }
@@ -841,29 +941,14 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
           } else if (e.type === "tool_call") {
             pushTool(e.preview, e.toolName);
           } else if (e.type === "tool_result") {
-            // Freebuff tool-branch.tsx: run_terminal_command shows the
-            // LAST 3 output lines ("...\n" + preview when more). The
-            // tool's output is JSON {command, stdout, stderr,
-            // exitCode}, so the stdout is extracted first.
-            let summary: string;
-            if (e.toolName === "run_terminal_command") {
-              let stdout = e.output;
-              try {
-                const parsed = JSON.parse(e.output) as { stdout?: unknown; stderr?: unknown };
-                if (typeof parsed.stdout === "string") stdout = parsed.stdout;
-                if (typeof parsed.stderr === "string" && parsed.stderr.trim() !== "") {
-                  stdout = `${stdout}\n${parsed.stderr}`;
-                }
-              } catch {
-                // Not JSON — fall back to the raw output.
-              }
-              const outLines = stdout.split("\n").filter((l) => l.trim() !== "");
-              const tail = outLines.slice(-3);
-              summary = (outLines.length > 3 ? "... " : "") + tail.join(" / ");
-            } else {
-              summary = e.output.replace(/\s+/g, " ").trim().slice(0, 120);
-            }
-            appendToLastTool(summary, e.ok);
+            // Display summary only (tool-summary.ts, Freebuff
+            // tool-branch.tsx + read-files.tsx): the full output
+            // still goes to the model in the loop's role "tool"
+            // history message. A null summary means no result line —
+            // the preview already says everything (read_files shows
+            // only its paths, never file contents).
+            const summary = summarizeToolResult(e.toolName, e.output, e.ok);
+            if (summary !== null) appendToLastTool(summary, e.ok);
           } else if (e.type === "todos") {
             agentTodosRef.current = e.todos;
             setAgentTodos(e.todos);
@@ -878,6 +963,18 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
         },
       });
       agentHistoryRef.current = result.history;
+      // Fase 7: per-turn usage surfacing (follow-up lama) — the
+      // footer already has the usage slot (formatUsageLine); the
+      // agent loop never fed it before, so agent turns showed no
+      // usage. The turn total (summed across steps) goes there.
+      if (result.usage) setLastUsage({ usage: result.usage, model: currentModel });
+      // Fase 7: auto-compaction notice — the stored history was
+      // shortened by a summary; tell the user once, plainly.
+      if (result.context?.compacted) {
+        pushSystem(
+          `Konteks percakapan lama diringkas otomatis (${result.context.droppedMessages} pesan lama diganti ringkasan) supaya tetap muat di context window.`,
+        );
+      }
       // Abort (Esc / Ctrl+C while streaming) used to vanish inside the
       // agent loop; plain chat reported it as "Request dibatalkan.".
       if (abort.signal.aborted) {
@@ -921,7 +1018,7 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
         const message = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
         // Provider-supplied text reaches the terminal through the
         // error block — strip escapes before storing it.
-        setError(sanitizeTerminalText(message));
+        setError(redact(sanitizeTerminalText(message)));
         setMessages((m) => {
           const copy = [...m];
           for (let i = copy.length - 1; i >= 0; i--) {
@@ -935,6 +1032,19 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
         });
       }
     } finally {
+      // Fase 8: whole-message redaction pass. Deltas are stored raw
+      // on purpose (a split ANSI escape would corrupt per-delta
+      // sanitizing); the loop redacts its own events, but a secret
+      // split across two deltas only becomes visible once the
+      // message is whole — redact the reassembled content + thinking
+      // of every assistant message before the turn is over.
+      setMessages((m) =>
+        m.map((msg) =>
+          msg.role === "assistant"
+            ? { ...msg, content: redact(msg.content), thinking: msg.thinking ? redact(msg.thinking) : msg.thinking }
+            : msg,
+        ),
+      );
       abortRef.current = null;
       sendingRef.current = false;
       agentRunningRef.current = false;
@@ -958,18 +1068,18 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
     setSending(true);
     setError(null);
     try {
-      let summary = "";
-      await streamChat(apiKey, modelRef.current, [{ role: "user", content: compactPrompt(chatHistory) }], {
-        onDelta: (d) => {
-          summary += d;
-        },
-        onUsage: () => undefined,
-      }, 1024);
+      // Fase 2: the one-shot summarization call goes through the
+      // ModelAdapter like every other model call (same transport,
+      // same text — only the contract differs).
+      const { text: summary } = await collectChatText(
+        createDefaultAdapter(),
+        { apiKey, model: modelRef.current, messages: [{ role: "user", content: compactPrompt(chatHistory) }], maxTokens: 1024 },
+      );
       agentHistoryRef.current = [];
       setMessages([
         {
           role: "assistant",
-          content: `Ringkasan percakapan:\n${sanitizeTerminalText(summary)}`,
+          content: `Ringkasan percakapan:\n${redact(sanitizeTerminalText(summary))}`,
           kind: "system",
           ts: Date.now(),
         },
@@ -978,7 +1088,7 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
       setScrollOffsetBoth(0);
     } catch (e) {
       const message = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
-      setError(sanitizeTerminalText(message));
+      setError(redact(sanitizeTerminalText(message)));
     } finally {
       sendingRef.current = false;
       setSending(false);
@@ -1141,6 +1251,28 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
     lastEditDueToNavRef.current = false;
   };
 
+  /**
+   * Handle one completed paste payload (Freebuff
+   * utils/strings.ts createPasteHandler: the payload is ANSI-
+   * stripped first, then — when longer than LONG_TEXT_THRESHOLD —
+   * becomes a text attachment instead of inline text).
+   * - Short paste: appended to the draft (MethaTech has no in-draft
+   *   cursor, so Freebuff's insert-at-cursor becomes append-at-end).
+   * - Long paste: a PendingTextAttachment card above the input box;
+   *   the draft stays clean and the full content rides with the
+   *   next send (see send()).
+   * - Whitespace-only payloads are ignored.
+   */
+  const handlePaste = (payload: string) => {
+    if (payload.trim().length === 0) return;
+    clearDraftEdit();
+    if (payload.length > LONG_TEXT_THRESHOLD) {
+      setAttachmentsBoth((prev) => [...prev, createTextAttachment(payload)]);
+    } else {
+      setInputBoth((v) => v + payload);
+    }
+  };
+
   // Build a fresh resolver snapshot from the synchronous refs (never
   // from closure state) and dispatch the single action it returns.
   const handleAtomicKey = (inputKey: string, key: Key) => {
@@ -1186,6 +1318,7 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
       historyNavDownEnabled: historyIdxRef.current !== -1,
       lastEditDueToNav: lastEditDueToNavRef.current,
       nextCtrlCWillExit: exitWarningRef.current,
+      attachmentsCount: attachmentsRef.current.length,
     };
     const action: KeyboardAction = resolveKeyboardAction(inputKey, key, state);
 
@@ -1295,7 +1428,10 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
         return;
       case "submit": {
         const text = curInput.trim();
-        if (!text) return;
+        // An attachments-only send (empty draft, cards present) is
+        // a real send — Freebuff's prepareUserMessage sends the
+        // attachments alone when there is no draft text.
+        if (!text && attachmentsRef.current.length === 0) return;
         clearDraftEdit();
         setInputBoth("");
         if (text.startsWith("/")) handleSlash(text);
@@ -1320,6 +1456,27 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
         // splitter below feeds it through "type" one char at a time,
         // so reaching here with Ctrl+V alone just types nothing.
         return;
+      case "attachment-remove-last":
+        // LIFO: the most recent card (Freebuff removes the clicked
+        // card; MethaTech has no click hit-test, so the newest card
+        // goes first). Removing the card removes the pending
+        // attachment — nothing orphaned is ever sent.
+        setAttachmentsBoth((prev) => prev.slice(0, -1));
+        return;
+      case "attachment-edit-last": {
+        // Freebuff has NO edit for text attachments (remove only).
+        // Reza asked for edit: expand the newest card back into the
+        // draft so it can be edited as plain text, then drop the
+        // card. Sending afterwards sends the edited text inline —
+        // the paste threshold applies to paste events only, not to
+        // edits, so it is not re-attached.
+        const last = attachmentsRef.current[attachmentsRef.current.length - 1];
+        if (!last) return;
+        clearDraftEdit();
+        setAttachmentsBoth((prev) => prev.slice(0, -1));
+        setInputBoth((v) => v + last.content);
+        return;
+      }
     }
   };
 
@@ -1332,6 +1489,18 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
   // runs back into atomic keypresses and run each through the same handler,
   // in order. CRLF counts as one Return.
   useInput((inputKey, key) => {
+    // Bracketed paste (see ./paste.ts) is intercepted FIRST, before
+    // the mouse parser and the atomic splitter: a paste payload may
+    // contain SGR-looking text (which the mouse parser would strip)
+    // and newlines (which the splitter would turn into submits), so
+    // neither may ever see the inside of a paste. Completed pastes
+    // go to handlePaste (short -> draft, long -> attachment card);
+    // while a paste is still open (chunked delivery, end marker not
+    // yet seen) the whole delivery is swallowed — a half paste must
+    // never reach the draft.
+    const fed = pasteAssemblerRef.current.feed(inputKey);
+    for (const payload of fed.pastes) handlePaste(payload);
+    if (fed.collecting) return;
     // Mouse input (SGR wheel/click, see ./mouse.ts) is intercepted
     // BEFORE the atomic splitter below: fed through it, a wheel
     // sequence would be shredded into "[<64;10;5M" characters typed
@@ -1339,7 +1508,7 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
     // page animation — a fling sends many events in a burst);
     // clicks/drags/motion are consumed silently; any non-mouse text
     // in the same delivery falls through to the keyboard path.
-    const mouse = parseMouseInput(inputKey, mouseFragmentPendingRef.current);
+    const mouse = parseMouseInput(fed.plain, mouseFragmentPendingRef.current);
     mouseFragmentPendingRef.current = mouse.fragmentPending;
     if (mouse.wheels.length > 0) {
       // A wheel event is a user scroll (Freebuff handleScrollChange):
@@ -1383,6 +1552,28 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
       if (inputKey.length === 0) handleAtomicKey("", key);
       return;
     }
+    // Fallback: a long PLAIN delivery with no bracketed markers is
+    // a paste from a terminal that ignored 2004h (Ink's own
+    // useInput docs: a paste arrives as one call). Checked BEFORE
+    // the splitter below — it would shred the payload and turn its
+    // embedded newlines into submits — and only when no wheel
+    // events rode in the same delivery (a scroll burst is not a
+    // paste). One trailing line break is stripped: it is either the
+    // user's Enter glued onto the paste or the paste's own final
+    // newline, and it does NOT submit — the user presses Enter
+    // again to send. The bracketed path is exact (no stripping,
+    // Enter arrives as its own call); this fallback is best-effort
+    // and documented as such in docs §4l.
+    if (
+      mouse.wheels.length === 0 &&
+      text.length > LONG_TEXT_THRESHOLD &&
+      !key.ctrl &&
+      !key.meta &&
+      key.return !== true
+    ) {
+      handlePaste(stripAnsi(text.replace(/\r\n?$/, "").replace(/\n$/, "")));
+      return;
+    }
     if (text.length <= 1) {
       handleAtomicKey(text, key);
       return;
@@ -1421,12 +1612,16 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
   // Horizontal gutters, layered exactly like Freebuff (see SIDE_GUTTER
   // in layout.ts): this root Box is the scroll container (chat.tsx
   // scrollbox contentOptions paddingLeft 1 / paddingRight 2, right 2 =
-  // 1 gutter + 1 scrollbar track — Ink renders the track as a trailing
-  // column, so the root only needs paddingX 1). On top of it: the
-  // message box adds SIDE_GUTTER 1 (message text at col 2), the header
-  // adds paddingLeft 1 (header text at col 2), the footer/status row
-  // stays at col 1 (status-bar.tsx root-level padding 1), and the
-  // input box keeps its border at col 1 with 1 space inside.
+  // 1 gutter + 1 scrollbar track in Freebuff's own geometry — MethaTech
+  // renders no track anymore (§4q), so the root only needs
+  // paddingX 1). On top of it: the
+  // message box adds SIDE_GUTTER 1 (message text at col 3), the header
+  // adds paddingLeft 1 (header text at col 3), the status row adds
+  // its own paddingLeft 1 (status-bar.tsx root box: indicator at
+  // col 3, aligned with the message text — NOT at col 2, one column
+  // left of the conversation), and the input box keeps its border
+  // at col 2 with 1 space inside. The footer lines stay at col 2
+  // (root padding only) — they are not status-bar content.
   return (
     <Box
       flexDirection="column"
@@ -1490,19 +1685,26 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
         )}
       </Box>
 
-      {/* Message area: flexGrow takes every row the fixed blocks leave;
-          justifyContent flex-end pins short histories right above the
-          input (Freebuff pattern). Filler rows paint the empty viewport
-          black; the window shows only the last budgeted visual lines. */}
+      {/* Message area: flexGrow takes every row the fixed blocks leave.
+          Freebuff chat.tsx contentOptions: justifyContent flex-start
+          for the Freebuff brand — the conversation is TOP-anchored, the
+          empty space sits below the last message inside the viewport,
+          never above it. 0.1.9 §4o: flex-end pinned short histories
+          right above the input and left a black void ABOVE the
+          conversation (up to 20 rows at 120x40) — that was the "celah
+          kosong". Filler rows still paint the empty viewport black, now
+          after the windowed lines, so the frame stays exactly `rows`
+          tall; the window shows only the last budgeted visual lines. */}
       <Box
         flexDirection="column"
         flexGrow={1}
-        justifyContent="flex-end"
+        justifyContent="flex-start"
         backgroundColor={theme.background}
       >
         {showWelcome && welcome ? (
           // Welcome / empty state: exactly `messageAvailable` rows,
-          // vertically centered content (layout.ts). No filler needed.
+          // top-anchored content (layout.ts, Freebuff chat.tsx: the
+          // header is the first child of the scrollbox). No filler needed.
           welcome.rows.map((line, i) => (
             <Text key={`w-${i}`}>
               {line.segments.map((seg, j) => (
@@ -1522,56 +1724,37 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
           ))
         ) : (
           <>
+            {showScrollIndicator && (
+              <Text color={theme.muted}>
+                {`↑ ${windowed.hiddenAbove} baris di atas · PgUp/PgDn riwayat`}
+              </Text>
+            )}
+            {windowed.lines.map((line, i) => (
+              <Text key={i}>
+                {line.segments.map((seg, j) => (
+                  <Text
+                    key={j}
+                    color={seg.color}
+                    bold={seg.bold}
+                    italic={seg.italic}
+                    strikethrough={seg.strikethrough}
+                    dimColor={seg.dim}
+                    backgroundColor={seg.backgroundColor}
+                  >
+                    {seg.text}
+                  </Text>
+                ))}
+              </Text>
+            ))}
+            {/* Filler AFTER the lines (0.1.9 §4o, Freebuff flex-start):
+                the empty viewport sits below the conversation, never
+                above it. Count unchanged — the frame stays exactly
+                `rows` tall. */}
             {Array.from({ length: fillerRows }, (_, i) => (
               <Text key={`f-${i}`} backgroundColor={theme.background}>
                 {fillerLine}
               </Text>
             ))}
-            {showScrollIndicator && (
-              <Box flexDirection="row" justifyContent="space-between">
-                <Text color={theme.muted}>
-                  {showScrollbar
-                    ? `↑ ${windowed.hiddenAbove} baris di atas · PgUp/PgDn riwayat`.slice(0, contentWidth - 1)
-                    : `↑ ${windowed.hiddenAbove} baris di atas · PgUp/PgDn riwayat`}
-                </Text>
-                {showScrollbar && (
-                  <Text color={scrollbarThumb.start <= 0 && scrollbarThumb.end > 0 ? theme.secondary : theme.muted}>
-                    {scrollbarChar(0)}
-                  </Text>
-                )}
-              </Box>
-            )}
-            {windowed.lines.map((line, i) => {
-              const rowIndex = (showScrollIndicator ? 1 : 0) + i;
-              const lineText = (
-                <Text key={i}>
-                  {line.segments.map((seg, j) => (
-                    <Text
-                      key={j}
-                      color={seg.color}
-                      bold={seg.bold}
-                      italic={seg.italic}
-                      strikethrough={seg.strikethrough}
-                      dimColor={seg.dim}
-                      backgroundColor={seg.backgroundColor}
-                    >
-                      {seg.text}
-                    </Text>
-                  ))}
-                </Text>
-              );
-              if (!showScrollbar) return lineText;
-              const isThumb =
-                rowIndex >= scrollbarThumb.start && rowIndex < scrollbarThumb.end;
-              return (
-                <Box key={i} flexDirection="row" justifyContent="space-between">
-                  {lineText}
-                  <Text color={isThumb ? theme.secondary : theme.muted}>
-                    {scrollbarChar(rowIndex)}
-                  </Text>
-                </Box>
-              );
-            })}
           </>
         )}
       </Box>
@@ -1582,14 +1765,20 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
           "Press Ctrl-C again to exit", theme.secondary. Otherwise
           the thinking/working shimmer + elapsed timer + ■ Esc. */}
       {exitWarning ? (
-        <Box>
+        <Box paddingLeft={1}>
           <Text color={theme.secondary}>Press Ctrl-C again to exit</Text>
         </Box>
       ) : (
         statusActive && statusLabel && (
-          <Box justifyContent="space-between">
+          <Box flexDirection="row" justifyContent="space-between" paddingLeft={1} paddingRight={1}>
             <Thinking label={statusLabel} />
-            <Text color={theme.muted}>{statusRightText}</Text>
+            <Box flexDirection="row" justifyContent="flex-end" gap={1}>
+              {statusRight.step !== null && <Text color={theme.secondary}>{statusRight.step}</Text>}
+              {statusRight.timer !== null && <Text color={theme.secondary}>{statusRight.timer}</Text>}
+              <Box paddingLeft={1} paddingRight={1}>
+                <Text color={theme.secondary}>■ Esc</Text>
+              </Box>
+            </Box>
           </Box>
         )
       )}
@@ -1597,6 +1786,37 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
       {error && (
         <Box>
           <Text color={theme.error}>{error}</Text>
+        </Box>
+      )}
+
+      {/* Pending attachment cards (Freebuff
+          pending-attachments-banner.tsx: a banner above the input
+          bar; here one bordered card per paste, in paste order).
+          Width adapts to the content (title / meta line), clamped
+          to 24–40 cols so a narrow terminal never overflows; the
+          title is truncated with an ellipsis at render time only
+          (the stored title keeps the full first line). */}
+      {attachments.length > 0 && (
+        <Box flexDirection="row" gap={1} paddingLeft={1} flexWrap="wrap">
+          {attachments.map((a) => {
+            const meta = attachmentMetaLine(a);
+            const inner = Math.min(36, Math.max(20, Math.max(a.title.length, meta.length)));
+            return (
+              <Box
+                key={a.id}
+                borderStyle="round"
+                borderColor={theme.muted}
+                paddingX={1}
+                flexDirection="column"
+                width={inner + 4}
+              >
+                <Text color={theme.text} bold>
+                  {truncateEnd(a.title, inner)}
+                </Text>
+                <Text color={theme.muted}>{meta}</Text>
+              </Box>
+            );
+          })}
         </Box>
       )}
 
@@ -1632,26 +1852,37 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
             <Text>{" "}</Text>
           </>
         ) : null}
-        <Box>
-          {input === "" ? (
-            <>
-              {!sending && (
-                <Text color={theme.accent} bold>
-                  ▋
-                </Text>
-              )}
-              <Text color={theme.muted}>{INPUT_PLACEHOLDER}</Text>
-            </>
-          ) : (
-            <>
-              <Text color={theme.text}>{input}</Text>
-              {!sending && (
-                <Text color={theme.accent} bold>
-                  ▋
-                </Text>
-              )}
-            </>
-          )}
+        {/* Composer rest height, 0.1.9 §4o (Freebuff chat-input-bar.tsx +
+            chat.tsx:2122-2123 shouldCenterInputVertically): single-line
+            draft + palette closed -> the content area is 3 rows with the
+            input vertically centered inside the bordered box (5 rows
+            total). Multiline / palette open -> hugs the content. */}
+        <Box
+          flexDirection="column"
+          height={centerInput ? COMPOSER_CENTERED_CONTENT_ROWS : undefined}
+          justifyContent={centerInput ? "center" : "flex-start"}
+        >
+          <Box>
+            {input === "" ? (
+              <>
+                {!sending && (
+                  <Text color={theme.accent} bold>
+                    ▋
+                  </Text>
+                )}
+                <Text color={theme.muted}>{INPUT_PLACEHOLDER}</Text>
+              </>
+            ) : (
+              <>
+                <Text color={theme.text}>{input}</Text>
+                {!sending && (
+                  <Text color={theme.accent} bold>
+                    ▋
+                  </Text>
+                )}
+              </>
+            )}
+          </Box>
         </Box>
       </Box>
       {/* Footer, line 1: model · price · cwd · /model to change ·

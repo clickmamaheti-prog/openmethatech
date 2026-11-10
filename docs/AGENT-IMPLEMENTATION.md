@@ -1246,23 +1246,831 @@ s28).
 - Mouse mode di terminal yang tidak mendukung SGR (pra-1006)
   tidak dites; X10 tidak didukung (lihat atas).
 
-## 5. Hasil build + test
+## 4j. Alias tag tool-call + nudge saat model janji tanpa call (live bug 2026-11-09)
 
+Laporan Reza dari Termux (0.1.8, glm-5.3-flash FREE, 05:36-05:37 WIB):
+1. "cek projeck kita" → model jawab "Baik, saya cek isi proyek dulu." lalu
+   mengeluarkan blok mentah `<codex_tool_call> {"cb_tool_name":
+   "list_directory", "path": "."} </codex_tool_call>` — tercetak mentah di
+   layar, TIDAK ada tool yang jalan, turn berakhir.
+2. "woy" → Thinking model bahkan menulis "I should respond in Indonesian...
+   and make a real tool call to list the project directory", jawabannya
+   "Haha, oke oke, saya cek proyeknya sekarang." — lalu TIDAK ADA tool call
+   sama sekali. Agen diem/stuck.
+3. Model yang sama PERNAH berhasil tool-call live di 0.1.7 (17:38 UTC, List +
+   Read jalan). Format XML BISA jalan di model ini, tapi tidak konsisten.
+
+Akar masalah (dari source, dua lapis):
+- `src/agent/xml-parser.ts`: `TOOL_XML_NAME = "codebuff_tool_call"` dengan
+  pencocokan tag eksak (`indexOf(START_TAG)`). Tag `<codex_tool_call>` tidak
+  dikenali → seluruh blok lolos sebagai `filteredText` → tampil mentah di
+  TUI. `parseFullText` mengembalikan 0 toolCalls DAN 0 parseErrors.
+- `src/agent/loop.ts` (cabang `parsed.toolCalls.length === 0`): turn berakhir
+  seketika dengan `completed = true, stopReason = "no more tool calls"`.
+  Aturan turn-end yang dilonggarkan (header loop.ts) tidak membedakan
+  "model menjawab teks polos" (selesai yang sah) dari "model berjanji
+  memakai tool tapi tidak mengeluarkan call" (harus di-retry). Niat model
+  yang jelas ("saya cek dulu") dibuang diam-diam.
+
+Perbaikan (A + B + C, semua untuk 0.1.9):
+- **A — alias tag** (`src/agent/xml-parser.ts`): `TOOL_XML_ALIASES =
+  ["codex_tool_call"]`; parser kini mencocokkan tag awal/akhir mana pun
+  dari daftar (`earliestIndex` + `matchedTagLength` + `findPartialTagMatchAny`,
+  jadi tag alias yang terbelah antar chunk tetap tertangani). Body JSON-nya
+  identik (`{"cb_tool_name": ...}`), jadi alias dipetakan ke call yang sama.
+  `formatToolCall` tetap kanonis. Tag alias yang tak tertutup → parse error
+  seperti tag kanonis.
+- **B — nudge** (`src/agent/loop.ts`): `looksLikeToolPromise` (ID + EN,
+  disengaja sempit: "saya cek/lihat/periksa…", "cek dulu/proyek/…",
+  "let me check/look/…", "I'll check/…" — jawaban polos seperti "4." atau
+  sapaan TIDAK cocok). Bila satu step tanpa tool call DAN tanpa parse error
+  DAN cocok janji, loop mengirim `[TOOL_CALL_MISSING]` sebagai pesan user
+  dan lanjut (maks `MAX_TOOL_CALL_NUDGES = 2` per turn, lalu turn berakhir
+  normal). Streak di-reset oleh step yang mengeluarkan tool call.
+- **C — prompt** (`src/agent/prompt.ts`): "The tag name is exactly
+  <codebuff_tool_call>. Never use any other tag name — not
+  <codex_tool_call>, not <tool_call>, not any variation." + "Never announce
+  that you will use a tool without emitting the call in the same response."
+
+Tes:
+- Unit baru (9): parser alias (ekstrak, terbelah per karakter, campur
+  kanonis + alias, tak tertutup → error); loop codex menjalankan
+  list_directory (repro bug live); loop janji → nudge → patuh; loop janji
+  2× → berakhir sesudah 2 nudge (3 step); sapaan polos tetap 1 step tanpa
+  nudge; prompt memuat larangan tag lain + larangan janji tanpa call.
+- PTY agen baru **A4** (`MOCK_CODEX=1`, 5 check): `List .` tampil dua kali
+  (alias + kanonis sesudah nudge), hasil list memuat `hello.txt`, TIDAK ada
+  `codex_tool_call`/`codebuff_tool_call` yang bocor, `Selesai` tampil.
+  Screenshot `docs/images/toolcall-a4-codex.png` dicek visual sendiri.
+- Tidak diubah: warna, typography, gutter, Markdown renderer, scrolling,
+  model selector, agent runtime selain cabang di atas.
+
+Keterbatasan jujur: nudge hanya menebak janji dari pola teks — model yang
+berjanji dengan kata-kata di luar pola tetap berakhir diam (tapi kini
+prompt + alias menutup dua jalur yang terlihat di screenshot). Verifikasi
+live di Termux Reza dengan model asli masih belum (mock saja).
+
+## 4k. Status bar + warna respons Freebuff — indikator, Agent step, foreground (spek Reza 2026-11-09)
+
+Laporan Reza dari Termux (0.1.8): (1) tulisan `working...` terlalu
+menempel batas kiri; (2) `Agent step 1 · 5s · ■ Esc` terlalu dempet;
+(3) teks respons utama AI abu-abu, kurang kontras. Ketiganya dibedah
+dari source Freebuff asli (`~/workspace/freebuff-source/`, commit
+5d8bd24) — bukan dari VectorHead, bukan tebakan.
+
+Akar masalah (tiga, dari source):
+
+1. **Indikator menempel kiri.** Status row MethaTech dulu dirender
+   sebagai teks polos di dalam root `<Box paddingX={1}>` — jadi
+   indikator mendarat di kolom 2 (1 spasi), sementara teks pesan
+   mendarat di kolom 3 (root 1 + `SIDE_GUTTER` 1, §4g). Diukur live
+   lewat tmux capture 2026-11-09 ~22:55 UTC: `working...` kolom 2,
+   `Buat daftar tugas dulu.` kolom 3. Freebuff tidak menaruh status
+   di dalam scrollbox pesan — ia punya komponen status bar sendiri
+   (`cli/src/components/status-bar.tsx:41`, root box `paddingLeft:
+   1, paddingRight: 1`) yang dirender di bawah scrollbox dengan
+   padding yang SAMA dengan konten (`chat.tsx` scrollbox
+   `contentOptions` `paddingLeft: 1 / paddingRight: 2`), jadi
+   indikator dan teks pesan selalu sejajar di kolom yang sama.
+2. **Agent step dempet.** Status kanan dulu SATU string datar:
+   `` `Agent step ${n} · ${elapsed} · ■ Esc` `` dalam `theme.muted`
+   — pemisah `·` adalah karakter teks, bukan jarak layout; tidak ada
+   prioritas saat sempit. Freebuff tidak punya string "Agent step"
+   sama sekali (grep: nol hasil) — status bar kanannya adalah zona
+   flex terpisah (`status-bar.tsx:327-333`: `flexGrow`/`flexBasis`
+   kondisional + `gap: 1`), kiri `flexGrow: 1, flexBasis: 0`
+   (`:306-308`), root `gap: 1` (`:279-281`). Jarak berasal dari
+   layout, bukan spasi.
+3. **Respons abu-abu.** `renderMarkdownText(text, width)` dipanggil
+   TANPA `baseColor` (`{}`) — `color: undefined` di segmen → Ink
+   memakai warna default terminal (abu-abu di Termux Reza).
+   Freebuff selalu mewariskan warna: `message-block.tsx:188`
+   `resolvedTextColor = textColor ?? theme.foreground`, lalu
+   `textColor={resolvedTextColor}` ke renderer (`:290`, `:308`).
+   Foreground Freebuff gelap `#f1f5f9` (`theme-system.ts:725`);
+   MethaTech sudah punya token yang sama persis: `theme.text =
+   #F5F5F5`.
+
+Perbaikan (0.1.9, semua di source asli):
+
+- **Status bar** (`src/ui/ChatApp.tsx`): status row direstruktur
+  jadi root `<Box paddingLeft={1} paddingRight={1}>` sendiri (bukan
+  teks di dalam root chat): zona kiri `flexGrow: 1, flexBasis: 0`
+  (indikator shimmer), zona kanan `flexDirection: "row",
+  justifyContent: "flex-end", gap: 1` — `Agent step N`, timer, dan
+  `■ Esc` sebagai item flex TERPISAH, semuanya `theme.secondary`
+  (Freebuff `theme-system.ts:716` `#a3aed0`; token MethaTech sama).
+  Tombol Esc di sel `<Box paddingLeft={1} paddingRight={1}>`
+  sendiri, seperti tombol Freebuff. Helper baru
+  `statusRightItems(availableWidth)` di `src/ui/thinking.ts`:
+  cascade lebar — lebar penuh `Agent step N` + timer + Esc; di
+  bawah ambang → `Step N` + timer + Esc; sangat sempit → timer +
+  Esc; terakhir → Esc saja. TIDAK ada spasi statis; jarak dari
+  `gap: 1` Yoga.
+- **Shimmer** (`src/ui/thinking.ts`): `SHIMMER_INTERVAL_MS` 180 →
+  160, nilai persis Freebuff (`status-bar.tsx:58`).
+- **Foreground** (`src/ui/markdown.ts` + `src/ui/layout.ts`):
+  `renderMarkdownText` menerima param `baseColor`; cabang
+  assistant di `flattenMessages` kini memanggilnya dengan
+  `theme.text` (`#F5F5F5`) — mekanisme yang sama dengan
+  `resolvedTextColor` Freebuff. Segmen berwarna lain tidak berubah:
+  heading kuning, inline code oranye, link biru, blockquote muted,
+  thinking tetap shimmer `theme.secondary` + bold, metadata tetap
+  muted, tool output tetap warna semantik.
+- **Tidak diubah:** agent runtime, tool calling, shell, model
+  selector, parser Markdown, history, scrolling, mouse.
+
+Tes:
+
+- Unit baru (5): `statusRightItems` cascade 80/40/24/16 kolom +
+  cap timer; assistant polos kini membawa `color: #F5F5F5` di
+  `flattenMessages` (probe `dist` membuktikan segmen polos dulu
+  `color: undefined`).
+- PTY TUI baru **s29** (15 check, `MOCK_AGENT=1`, first-delay
+  5000ms): 80 kol — `thinking...`/`working...` 2 spasi di depan
+  (sejajar teks pesan; dulu 1), `Agent step 1` + `■ Esc` tampil,
+  TIDAK ada `·` di baris status, balasan membawa escape foreground
+  `38;5;255` (tmux memetakan `#F5F5F5`); 40 kol — bentuk ringkas
+  `Step 1`, `■ Esc` tetap ada, tanpa `Agent step` panjang.
+- Screenshot dicek visual sendiri (sebelum vs sesudah, 80 + 40
+  kol): `docs/images/status-before-*.png` vs
+  `docs/images/status-after-*.png`.
+
+Keterbatasan jujur: warna akhir tetap bergantung pada terminal
+pengguna (tmux memetakan truecolor ke 256 warna; Termux Reza
+menampilkan default-abu-abu untuk teks tanpa warna — itulah yang
+diperbaiki: kini ada warna eksplisit). Verifikasi live di Termux
+Reza dengan model asli masih belum (mock saja).
+
+## 4l. Gap timestamp [HH:MM] — satu baris kosong sebelum "You:" (koreksi Reza 2026-11-09)
+
+Koreksi Reza atas screenshot sesudah §4k: jam `[23:06]` masih dempet —
+menempel langsung di atas baris `You: halo` tanpa jarak.
+
+Akar masalah (dari source): cabang user di `flattenMessages`
+(`src/ui/layout.ts`) mendorong `tsLine` lalu LANGSUNG baris `You:`
+berikutnya — tidak ada pemisah. Pesan lain sudah punya satuan jarak
+1 baris di mana-mana: tiap pesan diakhiri `blankLine()` (antar pesan),
+dan blok Thinking dipisah dari jawaban dengan `blankLine()`; hanya
+timestamp yang tidak punya.
+
+Bedah Freebuff (jujur): root `MessageBlock`
+(`cli/src/components/message-block.tsx:187-194`) adalah kolom TANPA
+gap — timestamp Freebuff memang duduk langsung di atas teks pesan,
+dan `single-block.tsx` memanggil konten user dengan `marginTop={0},
+marginBottom={0}`. Freebuff lolos secara visual karena teks user-nya
+polos italic TANPA label "You:" dan tanpa bar hijau solid; timestamp
+dim di atas teks polos terbaca sebagai header. Blok user MethaTech
+menambah label "You:" bold + bar hijau solid — satu blok berat yang
+dimulai tepat di bawah timestamp — jadi kedekatan yang sama terbaca
+dempet. Yang diadopsi adalah SATUAN jarak Freebuff, bukan posisi
+timestamp-nya: `gap: 1` di dalam satu pesan
+(`message-block.tsx:275`, content box) dan `paddingBottom: 1` antar
+pesan (`message-with-agents.tsx:226`).
+
+Perbaikan (0.1.9, satu tempat): cabang user `flattenMessages` kini
+mendorong `blankLine()` tepat sesudah `tsLine` — hanya bila ada
+timestamp; pesan user tanpa timestamp tidak mendapat baris kosong
+tambahan. Tidak diubah: warna, agent runtime, tool calling,
+scrolling, parser Markdown, model selector.
+
+Tes:
+
+- Unit baru (1 + penguatan 1): test gap khusus — pesan user BERTIMESTAMP
+  merender `[HH:MM]`, satu baris kosong, `You: halo`, baris kosong
+  penutup; pesan TANPA timestamp merender langsung `You: halo` tanpa
+  baris kosong di depan. Test timestamp lama diperkuat: `texts[1]`
+  harus kosong, `texts[2]` adalah baris `You:`.
+- PTY TUI baru **s30** (3 check, `MOCK_AGENT=1`, first-delay
+  5000ms): 80 kol dan 40 kol — baris `You: halo` tepat 2 baris di
+  bawah baris timestamp, dan baris di antaranya kosong.
+- Screenshot dicek visual sendiri (sebelum vs sesudah, 80 + 40 kol):
+  `docs/images/timestamp-before-*.png` vs
+  `docs/images/timestamp-after-*.png`.
+
+Catatan pengujian jujur: run penuh `test/tui-pty.sh` saat pengerjaan
+§4l tidak bisa hijau bersih — agen §4m/§4n bekerja paralel di tree
+yang sama (sesi tmux `methatech-tui-test` dan port mock 18099 yang
+sama dipakai bersama; `test/mock-server.mjs` sempat syntax error di
+tengah edit mereka), sehingga skenario akhir run itu gagal oleh
+tabrakan lingkungan, bukan oleh perubahan ini. Bukti §4l: unit
+191/191, agent-pty 32/32, dan probe terisolasi sebelum/sesudah
+(port 18098 + sesi tmux sendiri) yang menunjukkan gap di 80 dan 40
+kol (matematika baris s30 pada capture probe: sesudah diff=2 di
+kedua lebar, sebelum diff=1). Skenario s30 perlu diulang dalam run
+penuh yang bersih untuk konfirmasi akhir. — KONFIRMASI TERJADI
+saat pengerjaan §4n (2026-11-10 ~00:00 UTC): run penuh bersih
+`test/tui-pty.sh` (`/tmp/methatech-tui-pty-attach2`, mock sudah
+diperbaiki) — s30 3/3 hijau di 80 dan 40 kol, total run 234/235.
+
+## 4m. Tool-wall mentah — model menempel ulang isi file ke balasan (laporan live Reza 2026-11-09)
+
+Laporan live Reza (Termux, 06:05-06:08 WIB): agent membaca MEMORY.md +
+README.md, lalu SELURUH isi kedua file tampil mentah di chat sebagai
+tembok teks abu-abu raksasa (puluhan baris, termasuk detail infra dari
+MEMORY.md rumahnya).
+
+Koreksi diagnosis (probe `/tmp/probe-wall.mjs`, memakai
+`flattenMessages` dari dist, mereproduksi persis urutan live):
+tembok itu BUKAN blok hasil tool — blok tool `read_files` hanya
+merender 1 baris (`✓` + ringkasan 120 karakter); `ChatApp.tsx` sudah
+memotong hasil tool sejak dulu. 62 baris isi file + 63 baris
+ber-background abu code-block berasal dari TEKS BALASAN MODEL SENDIRI:
+model menarasikan "`read_files` dipanggil dengan paths [...]"
+lalu men-dump kedua file utuh di dalam fence code block. Koroborasi
+dari screenshot: baris tembok ber-background abu `#374151` (code
+block Markdown) dan TANPA marker `✓` (hasil tool selalu ber-`✓`/`✗`,
+tanpa background).
+
+Akar masalah dua lapis:
+
+1. Prompt (primer): system prompt MethaTech TIDAK punya aturan
+   larangan menempel ulang output tool. Freebuff punya:
+   `AGENT_PROGRESS_GUIDANCE`
+   (`common/src/constants/agent-work-style.ts:8`): "Use normal
+   assistant text, not thinking/reasoning, tool arguments, terminal
+   output, or to-do updates... Avoid tool-by-tool narration."
+2. Display (sekunder): hasil `read_files` masih menampilkan cuplikan
+   isi 120 karakter; Freebuff `ReadFilesComponent` hanya menampilkan
+   paths, isi TIDAK PERNAH tampil.
+
+Referensi Freebuff (clone commit 5d8bd24, diverifikasi dari source):
+`cli/src/components/blocks/tool-branch.tsx` (tool tanpa komponen
+terdaftar collapsed default; `finishedPreview`: shell = 3 baris
+terakhir output + prefix `...` bila lebih; tool lain = baris terakhir,
+markdown distrip; expanded = input JSON + `**Result:**` + output;
+toggle `▸`/`▾` di `tool-call-item.tsx`);
+`cli/src/components/tools/read-files.tsx` (hanya `• Read <paths>`,
+isi tidak pernah tampil); `list-directory.tsx` (hanya `• List
+<dirs>`); `run-terminal-command.tsx` (`TerminalCommandDisplay`
+expandable, `maxVisibleLines` 5, `collapsedPreview: $ <command>`);
+`registry.ts` (komponen per tool);
+`cli/src/utils/constants.ts:22-31`
+(`COLLAPSED_BY_DEFAULT_TOOL_NAMES` hanya `['set_output']`).
+Jujur dicatat: Freebuff TIDAK memotong code block panjang di balasan
+assistant (tidak ada maxLines/truncate di `content-with-markdown.tsx`
+/ `markdown-renderer.tsx`), dan `simplify-tool-results.ts` hanya soal
+context pruning, bukan display. Jadi tidak ada collapse display yang
+ditambahkan.
+
+Perbaikan (0.1.9):
+
+- `src/agent/prompt.ts` — bullet baru di Working rules: "Use tool
+  results to inform your answer. Never paste file contents, terminal
+  output, or other tool output back into your reply — summarize in
+  your own words and quote only a short excerpt (a few lines) when
+  the user explicitly asks to see the content. (Freebuff
+  AGENT_PROGRESS_GUIDANCE...)"
+- BARU `src/ui/tool-summary.ts` — `summarizeToolResult(toolName,
+  output, ok)` murni: shell = 3 baris terakhir + prefix `...`
+  (dipindah verbatim dari ChatApp); `read_files` sukses → `null`
+  (tanpa baris hasil, paritas Freebuff paths-only); `read_files`
+  gagal → ringkasan error; tool lain → 1 baris max 120 karakter +
+  ` (+N baris)` bila multi-baris. Display only — isi penuh tetap ke
+  model lewat history `role: "tool"` di `loop.ts`.
+- `src/ui/ChatApp.tsx` — handler `tool_result` kini memanggil helper;
+  `null` = tidak ada baris hasil.
+- Backup: `.bak-20261109-toolwall/`. TIDAK diubah: agent runtime,
+  tool calling, shell, model selector, Markdown parser, history,
+  scrolling, composer/paste, `layout.ts`.
+
+Tes:
+
+- `npx tsc` bersih. `npm test` 223/223 (BARU
+  `test/tool-summary.test.mjs`, 9 tes: shell last-3 + prefix, stderr,
+  fallback non-JSON, read sukses → null, read gagal → error, list
+  multi-baris + `(+10 baris)`, single-line tanpa suffix, output
+  kosong).
+- BARU di `test/agent.test.mjs` (terverifikasi eksplisit by name):
+  prompt mengandung aturan anti-echo; loop baca file 60 baris —
+  history tool message mengandung baris 01 DAN baris 60 (isi penuh
+  sampai ke model) sementara display summary-nya null, dan history[0]
+  membawa aturan tersebut.
+- Shell last-3-lines tidak berubah dan tetap dicover A1 agent-pty.
+- PTY + screenshot s31 TERBLOKIR saat pengerjaan: mock-server.mjs
+  syntax error karena edit tengah jalan agen paste (rantai duplikat).
+  Skenario baru s31 (8 check) sudah ditulis di `test/tui-pty.sh`.
+  Verifikasi PTY s31 + PNG before/after harus diulang sesudah mock
+  diperbaiki (mock sudah diperbaiki agen paste 2026-11-10 ~00:00 UTC;
+  run penuh bersih sesudahnya 234/235, s31/80 hijau).
+- Caveat jujur: kepatuhan prompt tidak bisa dibuktikan mock
+  scripted — verifikasi live di Termux Reza dengan model asli masih
+  diperlukan; model gratis tidak konsisten, jadi aturan prompt
+  mengurangi echo tapi tidak menjamin 100%. Follow-up yang mungkin
+  (BUKAN Freebuff, butuh perintah Reza): collapse display untuk code
+  block raksasa hasil echo di balasan assistant, bila model masih
+  meng-echo meski sudah ada aturan prompt.
+
+## 4n. Large paste attachment ala Freebuff — paste panjang jadi kartu, isi utuh ke agent (spek Reza 2026-11-09)
+
+Spek Reza: paste teks panjang jangan membanjiri composer — jadikan
+text attachment ringkas (ikon, judul ellipsis, jenis konten, jumlah
+baris, edit, hapus), dan isi UTUH harus sampai ke agent (bukan kartu
+palsu). Sebelum perbaikan, paste 66 baris langsung masuk draft dan
+mendorong riwayat keluar layar.
+
+Audit source Freebuff asli (clone commit 5d8bd24, BUKAN VectorHead):
+
+- `cli/src/utils/strings.ts`: `LONG_TEXT_THRESHOLD = 2000` dan
+  `createPasteHandler` — paste LEBIH PANJANG dari 2000 karakter
+  diubah jadi text attachment; yang pendek masuk composer biasa.
+- `cli/src/types/store.ts`: `PendingTextAttachment` (id, judul,
+  konten, tipe) — disimpan di state chat, BUKAN file sementara.
+- `cli/src/state/chat-store.ts`: tambah/hapus pending attachment.
+- `cli/src/utils/pending-attachments.ts`: helper daftar pending.
+- `cli/src/hooks/helpers/send-message.ts`: saat kirim, tiap
+  attachment ditempel ke pesan sebagai blok
+  `[Pasted Text]\n<isi utuh>` sesudah teks biasa.
+- `cli/src/components/text-attachment-card.tsx`,
+  `attachment-card.tsx`, `pending-attachments-banner.tsx`: kartu
+  ringkas di composer (judul, tipe, jumlah baris, edit, hapus).
+- `cli/src/components/chat-input-bar.tsx`,
+  `multiline-input.tsx`: composer + banner pending.
+- Bracketed paste (`ESC[200~`/`ESC[201~`): TIDAK ada penanganan
+  khusus di source Freebuff — mode itu milik lapisan terminal/TUI.
+  Di MethaTech, Ink TIDAK mengubah paste jadi event khusus:
+  dibuktikan probe empiris (pty + tmux `send-keys -H`) bahwa marker
+  `[200~` / `[201~` sampai sebagai `useInput` terpisah dan payload
+  bisa terbelah antar call — jadi assembler sendiri wajib ada.
+
+Implementasi (0.1.9, file BARU + integrasi minimal):
+
+- `src/ui/paste.ts` (baru): `PASTE_ENABLE`/`PASTE_DISABLE`
+  (`\x1b[?2004h`/`\x1b[?2004l`, ditulis `src/commands.ts` saat
+  chat mulai/berhenti) dan `createPasteAssembler()` — merakit
+  payload dari marker terbelah/chunked sebelum diproses; paste
+  tanpa marker (terminal yang tidak mendukung bracketed paste)
+  tetap ditangani sebagai input biasa. `stripAnsi` membersihkan
+  escape nakal dari payload supaya paste tidak mengetik perintah
+  atau memicu shortcut.
+- `src/ui/attachments.ts` (baru): `LONG_TEXT_THRESHOLD = 2000`
+  (nilai Freebuff, diadopsi mentah); `PendingTextAttachment`
+  (id, title, content, contentType, lineCount — in-memory, tanpa
+  file sementara, sama seperti Freebuff); `deriveTitle` (judul dari
+  heading Markdown pertama / baris pertama, ellipsis hanya visual —
+  nama asli tetap di metadata); `detectContentType` (Markdown vs
+  Text dari penanda Markdown); `createTextAttachment`;
+  `buildSendContent(draft, attachments)` — teks biasa, baris
+  kosong, lalu SATU blok `[Pasted Text]\n<isi utuh>` per attachment
+  sesuai urutan paste; line break, Unicode, dan Markdown
+  dipertahankan byte-identik.
+- `src/ui/ChatApp.tsx` (integrasi scoped): paste panjang → kartu,
+  paste pendek → draft; `Ctrl+E` edit (kartu dibuka ke draft
+  sebagai teks biasa, attachment dihapus — kirim ulang sebagai
+  draft polos tanpa blok `[Pasted Text]`); `Ctrl+X` hapus kartu +
+  referensinya dari draft (tanpa konten yatim); footer hint
+  `lampiran: Ctrl+E edit · Ctrl+X hapus` hanya bila ada kartu.
+- `src/ui/layout.ts`: kartu attachment di composer (border +
+  `📄 <judul> · <tipe> · <N> baris`) dan baris riwayat sesudah
+  kirim (`📎 <judul> · <tipe> · <N> baris`); isi lampiran TIDAK
+  pernah dirender ke layar.
+- TIDAK diubah: agent runtime (`loop.ts`, `api.ts`), tool calling,
+  shell, model selector, parser Markdown, history, scrolling,
+  mouse. Kontrak agent tidak berubah — yang berubah hanya isi
+  `userPrompt` yang dikirim (draft + blok `[Pasted Text]`).
+
+Tes:
+
+- Unit `test/attachments.test.mjs` (21 tes): threshold 2000
+  (1999 masuk draft, 2000+ jadi kartu), judul/tipe/jumlah baris,
+  assembler (marker terbelah, chunked, tanpa marker, ANSI
+  strip), `buildSendContent` (urutan draft + 2 attachment, line
+  break, Unicode, Markdown utuh), edit/remove tanpa yatim.
+  `npm test`: **225/225 lolos** (223 saat §4n selesai + 2 tes
+  tool-summary §4m yang mendarat paralel).
+- PTY TUI baru **s32** (20 check, 80 + 40 kol): paste pendek
+  masuk draft tanpa kartu; paste 66 baris → kartu judul + tipe +
+  jumlah baris, composer tidak kebanjiran; `Ctrl+X` hapus kartu +
+  hint; edit lalu kirim → teks penuh sebagai draft polos tanpa
+  blok `[Pasted Text]`; kirim dengan kartu → mock menjawab
+  `Lampiran diterima: <karakter> karakter, <baris> baris.`
+  + cuplikan TENGAH lampiran; capture file mock membuktikan
+  sentinel tengah + baris Unicode byte-identik + blok
+  `[Pasted Text]` ada di prompt yang dikirim; riwayat menampilkan
+  baris kartu; isi lampiran tidak pernah tampil di layar.
+- Mock `test/mock-server.mjs` (`MOCK_ATTACHMENT=1`): membaca body
+  request, menangkap pesan user terakhir verbatim ke
+  `MOCK_CAPTURE_FILE` (satu JSON per request), menjawab receipt
+  teks polos (tanpa tool call → 1 request per kirim).
+- Screenshot dicek visual sendiri (sesudah, 80 + 40 kol):
+  `docs/images/paste-after-80.png`,
+  `docs/images/paste-after-40.png`. TIDAK ada screenshot SEBELUM
+  yang jujur — perilaku sebelum (paste membanjiri composer)
+  hanya dideskripsikan dari kode, tidak direkayasa dari build lama.
+
+Catatan pengujian jujur (kesalahan sendiri, diakui langsung):
+edit pertama mock oleh agen §4n merusak `test/mock-server.mjs`
+(sintaks: duplikasi rantai `let chunks` + `if (MOCK_CODEX)` dari
+cabang §4j sehingga satu `}` hilang) — mock tidak bisa start dan
+run penuh `tui-pty.sh` saat itu gagal 74 check (161/235),
+termasuk skenario §4j/§4k/§4l/§4m yang tidak ada hubungannya
+dengan paste. Perbaikan: rantai dirapikan (hapus pembuka duplikat
+sehingga `else if (MOCK_CODEX)` jadi cabang pertama rantai yang
+rata — sekaligus memperbaiki shadowing `let chunks` yang membuat
+`sendNext` membaca `chunks` yang tidak pernah diisi di mode
+non-attachment), lalu `node --check` + smoke curl 3 mode
+(attachment / polos / codex) hijau sebelum run ulang. Run penuh
+bersih sesudah perbaikan: **tui-pty 234/235** (satu-satunya gagal
+s31/40: baris preview `Read big.txt` §4m keluar viewport di 40
+kol — artefak viewport, bukan regresi; s31/80 hijau dan kedua
+jaminan anti-tembok di 40 kol tetap lolos), **agent-pty 32/32**
+(sesudah satu check a1 yang usang diselaraskan dengan §4m: isi
+file hasil `read_files` memang TIDAK tampil lagi — lihat §4m).
+Verifikasi live di Termux Reza (paste panjang asli dari Android)
+masih diperlukan — PTY di sini mensimulasikan bracketed +
+chunked paste, bukan clipboard HP sungguhan.
+
+## 4o. Full viewport + composer height ala Freebuff (spek Reza 2026-11-09)
+
+Spek Reza: tinggi composer belum sesuai Freebuff, dan TUI masih
+menyisakan celah kosong — tidak memakai seluruh area terminal.
+Audit dulu (read-only, probe terisolasi), baru implementasi.
+Penomoran: §4m dicadangkan untuk perbaikan tool-wall (agen paralel,
+belum menulis docs saat §4o ini ditulis), §4n sudah dipakai paste.
+
+Bedah Freebuff asli (clone commit 5d8bd24, BUKAN VectorHead):
+
+- Root: `cli/src/chat.tsx:2236` root `<box flexDirection: column,
+  gap: 0, flexGrow: 1>` — TANPA height eksplisit; root OpenTUI
+  mengisi viewport terminal. Scrollbox `flexGrow: 1` mengambil sisa
+  ruang; bottom box `flexShrink: 0` (StatusBar di atas ChatInputBar,
+  FreebuffChatFooter di bawah) menempel di bawah.
+- Conversation anchoring: scrollbox `contentOptions`
+  (`chat.tsx:2243`) `justifyContent: IS_FREEBUFF ? "flex-start" :
+  "flex-end"` — untuk merek Freebuff, pesan TOP-anchored; ruang
+  kosong duduk di BAWAH pesan terakhir, di dalam scrollbox.
+  `stickyScroll stickyStart="bottom"` menjaga percakapan panjang
+  tetap menempel di bawah saat streaming.
+- Composer: `cli/src/components/chat-input-bar.tsx:485-499`
+  ClickableTitleBox (border single, paddingLeft/Right 1,
+  paddingTop/Bottom 0), suggestion menu di DALAM box di atas input
+  dengan gap 1. Inner content box `minHeight:
+  shouldCenterInputVertically ? 3 : undefined`,
+  `justifyContent: shouldCenterInputVertically ? "center" :
+  "flex-start"`, dengan `shouldCenterInputVertically =
+  !hasSuggestionMenu && !isMultilineInput` (`chat.tsx:2122-2123`).
+  Jadi saat istirahat (draft 1 baris, tanpa menu) area konten 3
+  baris dengan baris input di tengah secara vertikal → box ber-border
+  5 baris. Multiline atau menu terbuka → box menempel konten.
+- Multiline cap: `maxHeight={Math.floor(terminalHeight / 2)}` pada
+  MultilineInput (chat.tsx + chat-input-bar.tsx, mode normal maupun
+  compact); `computeInputLayoutMetrics`
+  (`cli/src/utils/text-layout.ts:113-149`): heightLines =
+  clamp(totalLines + gutter, maxHeight), min 1; gutter bawah
+  ditambah bila kursor di baris 2 dari tepat 2 baris.
+- Dimensi: `cli/src/hooks/use-terminal-dimensions.ts` — lebar dari
+  hook OpenTUI, tinggi dari `renderer.height`, fallback 80×24;
+  `separatorWidth = width - 2`, `contentMaxWidth = min(width - 4,
+  80)`. Breakpoint lebar xs <50, sm 50-100, md 100-150, lg >150;
+  tinggi xs <20, sm 20-40, md >40. `isCompactHeight` (tinggi xs)
+  → composer tanpa border, glyph `❯`, cap yang sama.
+- Status bar di atas input, footer di bawah input, keduanya di
+  dalam bottom box yang sama.
+
+Penyebab celah kosong di MethaTech (terukur dengan probe tmux,
+bukan tebakan):
+
+- Root + resize SUDAH benar sebelum perbaikan: root Box
+  `height={rows}` dari `stdout.rows` + listener resize — frame
+  mengisi terminal PERSIS di 80×24, 40×15, 120×40, resize live
+  80×24→80×40 dan →80×15 dua arah (lastNonEmpty = rows-1 di semua
+  ukuran). Bukan sumber celah.
+- Penyebab #1 — message area `justifyContent="flex-end"` +
+  filler SEBELUM windowed lines: percakapan pendek menempel di
+  bawah, void DI ATAS percakapan. Terukur: percakapan pendek di
+  120×40 punya void 20 baris (baris 1-20 kosong); welcome-120
+  terpusat vertikal dengan void 11 baris di atas + 12 di bawah.
+- Penyebab #2 — welcome `welcomeLayout` membagi slack jadi
+  topPad = ceil(slack/2) / bottomPad (terpusat vertikal).
+- Penyebab #3 — composer 3 baris saat istirahat (2 border + 1
+  baris input), bukan 5 baris Freebuff (3 baris konten terpusat +
+  2 border).
+
+Perbaikan (0.1.9, hanya layout — `src/ui/ChatApp.tsx` +
+`src/ui/layout.ts`):
+
+- Message area `justifyContent` flex-end → flex-start; filler
+  pindah ke SESUDAH windowed lines (indikator scroll tetap di
+  atas, sebelum lines; thumb scrollbar tidak berubah — per baris
+  di dalam map). Frame tetap persis `rows` (jumlah filler tidak
+  berubah).
+- `welcomeLayout`: topPad `ceil(slack/2)` → `0` (top-anchored;
+  Freebuff header = anak pertama scrollbox). Slack kini seluruhnya
+  di bawah konten.
+- Composer: helper murni baru `composerIsCentered(inputContentRows,
+  paletteOpen)` + `COMPOSER_CENTERED_CONTENT_ROWS = 3` di
+  `layout.ts`; `ChatApp.tsx` menghitung `centerInput` dan
+  `effectiveInputContentRows` (3 bila centered, else baris wrap)
+  dan memakainya di `inputBoxBaseRows` + `inputBoxRowsFor`, supaya
+  budget picker/palette menyusut tepat 2 baris dan input tidak
+  pernah terdorong keluar layar. Render: wrapper kolom `height: 3`
+  + `justifyContent: center` di dalam box ber-border saat istirahat;
+  multiline / palette terbuka → menempel konten.
+- TIDAK diadopsi: compact mode tinggi xs <20 (borderless + `❯`) —
+  composer ber-border tetap muat di 15 baris (probe 80×15: message
+  9 baris, input 5, footer 2, tanpa clipping) dan mengubah tampilan
+  composer di terminal pendek adalah perubahan identitas di luar
+  spek Reza. Ink tidak punya API `renderer.height` ala OpenTUI;
+  padanan yang dipakai (`stdout.rows` + listener resize) sudah
+  terbukti benar lewat probe resize live.
+
+Regresi yang ditemukan perbaikan ini — dan diperbaiki di tempat:
+
+- Welcome terpotong di 80×24: konten banner 17 baris, message area
+  tinggal 16 baris (composer 5 baris) → baris hint (`Type /model
+  ... /models ...`) terpotong, s13 `/models` gagal. Perbaikan:
+  blank kedua sesudah info box dihapus (cabang sempit memang tidak
+  pernah punya blank itu) → konten 16 baris, muat persis. Unit
+  baru mengunci: `welcomeLayout` available 16 harus memuat `/models`.
+- s15/s21: baris input pindah 21 → 20 (baris tengah composer
+  5 baris) — ekspektasi test diperbarui, perilaku recall/history
+  tidak berubah (recall terbukti jalan di baris 20).
+- s27: blockquote di flat line 17 tidak muat lagi dalam satu frame
+  16 baris sesudah 3× PageUp; struck text 40 kol di flat line 7
+  juga 1 baris di bawah lipatan (landing PageUp bervariasi ±1 baris
+  antar run). Perbaikan test (bukan renderer): 1× PageDown sesudah
+  PageUp — posisi jendela jadi deterministik menampilkan baris
+  target di kedua lebar. Renderer Markdown tidak diubah.
+- s31/40: KOREKSI diagnosis laporan §4n — gagalnya BUKAN "artefak
+  viewport sempit". Akar: mock `agentReq` stateful per proses;
+  run s31/80 sudah menghabiskan texts[0] (read) + texts[1]
+  (complete), lalu s31/40 memakai mock yang sama tanpa restart —
+  request pertama run 40 kol langsung dapat texts[1] (tanpa
+  read_files call, tanpa preview `Read big.txt` sama sekali), jadi
+  check tidak mungkin lolos. Dibuktikan: probe bersih
+  before-vs-current dengan lifecycle mock yang benar menunjukkan
+  perilaku IDENTIK di kedua build; run §4n yang lama gagal dengan
+  gejala sama di build pra-viewport. Perbaikan harness (test saja):
+  `restart_mock 5000` sebelum `start_tui 40 15` di blok s31.
+  (Pelajaran probe: pola `(cd dir && node ... & echo $!)` menyimpan
+  PID subshell, bukan PID node — mock basi tetap hidup dan
+  melayani run berikutnya dengan `agentReq` yang sudah maju.
+  Pakai `node ... &` langsung + verifikasi port bebas.)
+
+Tes:
 
 - `npx tsc` (strict): BERSIH.
-- `npm test`: **176/176 lolos** (167 sesudah Markdown + 9 baru
-  wheel: 8 `test/mouse.test.mjs` + 1 `wheelScrollOffset` di
-  `test/layout.test.mjs`).
-- `bash test/tui-pty.sh`: **190/190 lolos** (171 sesudah Markdown
-  + 19 s28 baru wheel: top-anchored 1/13/8, tap ditelan, streaming
-  tanpa yank, 40 kol; SERTA perbaikan regresi key-only —
-  versi pertama intercept mouse menelan event Arrow/PgUp/Tab/Esc
-  yang tiba dengan `input === ""`, 21 check s2/s10/s15/s16/s17/s23
-  sempat gagal, diperbaiki dan suite penuh hijau lagi).
-- `bash test/agent-pty.sh`: **27/27 lolos** (tidak berubah;
-  A1 membuktikan agen jalan BY DEFAULT dari welcome screen).
+- `npm test`: **226/226 lolos** (223 + 3 baru §4o: top-anchor,
+  centered, muat-16-baris).
+- `bash test/tui-pty.sh`: **256/256 lolos** (run penuh bersih,
+  `/tmp/methatech-tui-pty-viewport3`, 2026-11-10 ~00:40 UTC) —
+  termasuk s33 baru (21 check) + s27 yang diarahkan ulang +
+  s31/40 yang kini hijau sesudah perbaikan harness. Run 2
+  sebelumnya (tanpa perbaikan s31): 255/256, satu-satunya gagal
+  s31/40 (bug harness di atas, bukan regresi).
+- `bash test/agent-pty.sh`: **32/32 lolos** (tidak berubah —
+  §4o tidak menyentuh agent runtime).
+- Probe terisolasi `/tmp/probe-s27s33.sh` (sesi + port sendiri):
+  26/26 (s27 PageDown re-aim + s33 semua ukuran).
+- Screenshot dicek visual sendiri (sebelum vs sesudah, 80 + 120
+  kol): `docs/images/viewport-{before,after}-{80,120}-{welcome,chat}.png`.
+  Before = tree saat ini minus edit viewport (salinan
+  `/tmp/vp-before`, dibangun dari `.bak-20261109-viewport/` +
+  tree saat ini — diff vs backup membuktikan hanya edit viewport
+  yang dibedakan). After: percakapan di atas (timestamp baris 2),
+  void di bawah pesan, composer 5 baris dengan placeholder di
+  baris tengah; welcome top-anchored dengan hint `/model` +
+  `/models` tetap terlihat di 80×24.
+
+Yang BELUM / follow-up:
+
+- Kartu attachment (4 baris per baris kartu) TIDAK dihitung di
+  `layoutBudget`/`fixedExcludingOverlays` — bila kartu tampil,
+  frame meluber dan footer terpotong dari layar. Ditemukan saat
+  audit (bukan dibuat §4o); itu area agen paste (§4n) yang masih
+  berjalan — jangan perbaiki sebelum pekerjaannya mendarat, supaya
+  tidak tabrakan.
+- Verifikasi live di Termux Reza masih diperlukan: swipe up/down
+  + composer 5 baris + welcome top-anchored di HP asli (mock
+  bukan pengganti perangkat fisik).
+
+## 4p. Timestamp [HH:MM] diturunkan — baris kosong §4l kejauhan (koreksi Reza 2026-11-10)
+
+Koreksi Reza atas screenshot §4l: "jam turunin dikit jangan ke
+jauhan, liat script freebuff nya" — baris kosong penuh sesudah
+`[HH:MM]` terlalu jauh; jam harus lebih dekat ke baris `You:`.
+
+Bedah Freebuff (dari source, file + baris + nilai persis):
+
+- `cli/src/components/message-block.tsx:187-194` — root kolom
+  TANPA gap (`flexDirection: column`, tanpa gap).
+- `:197-222` — timestamp user: satu box baris, `gap: 1`,
+  `[timestamp]` DIM; `:275` — content box `gap: 1` antar blok
+  di DALAM satu pesan (bukan antara timestamp dan teks).
+- `cli/src/components/message-with-agents.tsx:220-228` —
+  wrapper pesan `gap: 0`, `paddingBottom: 1` antar pesan.
+- `:144-159` — `contentBoxStyle` `padding: 0`,
+  `paddingLeft/Right: SIDE_GUTTER` (= 1).
+- `:236-252` — garis vertikal user `width: 1`,
+  `marginTop: 0, marginBottom: 0`, membentang sepanjang pesan
+  TERMASUK baris timestamp.
+- `cli/src/components/single-block.tsx` — teks user italic,
+  `marginTop: 0, marginBottom: 0`, tanpa label "You:".
+
+Kesimpulan: Freebuff menaruh timestamp LANGSUNG di atas teks
+(diff=1, tanpa baris kosong). Yang membuat tidak dempet bukan
+jarak vertikal, melainkan garis vertikal kontinu di sisi kiri
+yang membentang sepanjang pesan termasuk baris timestamp.
+§4l salah mengira jaraknya: baris kosong penuh (diff=2) adalah
+jarak antar pesan Freebuff, bukan jarak timestamp ke teks.
+
+Perbaikan (0.1.9, satu tempat): cabang user `flattenMessages`
+(`src/ui/layout.ts`):
+
+- `blankLine()` sesudah `tsLine` DIHAPUS — timestamp kembali
+  tepat di atas baris `You:` (diff=1, persis Freebuff).
+- `borderSegs` kini ikut dirender di baris `tsLine` — bar hijau
+  menyala (`backgroundColor: theme.accent`) berjalan di samping
+  baris timestamp, sama seperti baris `You:` — garis vertikal
+  kontinu ala Freebuff, sehingga timestamp dan teks terbaca satu
+  blok tanpa menempel.
+- Tidak diubah: warna, agent runtime, tool calling, scrolling,
+  parser Markdown, model selector, threshold paste, layout
+  viewport, status bar.
+
+Bukti visual (capture ANSI 80 kol, probe terisolasi): baris 2
+`  ` + segmen bar hijau `48;5;156` + spasi `48;5;16` + `[01:13]`
+warna muted `38;5;152`; baris 3 prefix ANSI IDENTIK + `You:
+halo`. Di teks polos keduanya 4 spasi depan (root `paddingX: 1`
++ gutter 1 + bar 1 + spasi 1) — timestamp sejajar persis dengan
+teks `You:` dan bar berjalan di samping keduanya.
+
+Tes:
+
+- `npx tsc` (strict): BERSIH.
+- `npm test`: **225/225 lolos**. Catatan jujur: total turun
+  226 → 225 BUKAN regresi §4p — agen §4q bekerja paralel di tree
+  yang sama dan menghapus 1 unit test `scrollbarThumbRange`
+  beserta fungsinya (`src/ui/layout.ts:732` kini tinggal komentar
+  "lived here"). Unit §4p sendiri: 2 test timestamp ditulis ulang
+  (tanpa blank di tengah, bar di `tsLine`) + 1 penguatan
+  (`You:` di `texts[2]`), semua hijau.
+- `bash test/agent-pty.sh`: **32/32 lolos** (tidak berubah —
+  §4p tidak menyentuh agent runtime).
+- PTY TUI s30 diperbarui (3 check): baris `You:` tepat 1 baris
+  di bawah timestamp (bukan 2), baris timestamp 4 spasi depan
+  (root padding 1 + gutter 1 + bar 1 + spasi 1), 80 + 40 kol.
+- Run penuh `test/tui-pty.sh` (terisolasi: socket tmux sendiri
+  `methatech-4p`, mock port 18097, outdir sendiri):
+  **PASS=270 FAIL=0** (`/tmp/methatech-tui-pty-4p3`,
+  2026-11-10 ~01:33 UTC) — termasuk s30 3/3 dan s33/80 yang
+  diperbarui (`You:` baris 3, bukan 4 — ekspektasi §4o yang
+  mengunci baris kosong §4l). Catatan jujur: run terisolasi
+  pertama (sebelum perbaikan ekspektasi s33) mencatat
+  267/270 — 2 gagal s26 (divider 75 vs 74 di 80 kol, 35 vs 34
+  di 40 kol, "saat scrollbar tampil") dan 1 gagal s33/80 di
+  atas. s26 adalah area §4q (scrollbar): lebar divider
+  bergantung pada tampil-tidaknya track scrollbar di saat
+  capture — di run final keduanya hijau tanpa perubahan kode
+  §4p (tidak ada file src yang berubah antara kedua run;
+  rebuild dist 01:33:17 adalah rebuild source yang sama).
+  Flaky di sekitar perubahan scrollbar §4q, bukan regresi §4p
+  (§4p tidak menyentuh divider/lebar/scrollbar); tetap dicatat
+  di sini supaya §4q mengawasi s26.
+- Screenshot dicek visual sendiri (sebelum vs sesudah, 80 + 40
+  kol): before = `docs/images/timestamp-after-*.png` (keadaan
+  §4l: baris kosong, kejauhan), after =
+  `docs/images/timestamp-p-after-*.png` (capture s30).
+
+Catatan pengujian jujur: run penuh `test/tui-pty.sh` saat
+pengerjaan §4p tidak bisa hijau bersih di percobaan pertama —
+agen §4q (§4q scrollbar) bekerja paralel di tree yang sama dan
+menjalankan run PTY-nya sendiri di sesi tmux
+`methatech-tui-test` + port mock 18099 yang sama; run §4p
+pertama terkontaminasi (s2/s3/s4/s7/s10 gagal oleh tabrakan
+lingkungan, sesi `methatech-tui-test-4p` ikut mati), dan
+perbaikan skrip probe sempat ter-scrub oleh redactor (nilai key
+test diganti placeholder `<redacted>` sehingga perintah tmux
+gagal — diperbaiki via sed di exec). Solusi yang jalan:
+isolasi penuh — socket tmux sendiri (`tmux -L methatech-4p`
+lewat wrapper PATH), mock port 18097, outdir positional
+sendiri — plus perbaikan satu jebakan salinan skrip (skrip
+`cd "$(dirname "$0")/.."` jadi salinan HARUS di dalam repo,
+bukan di /tmp). Run penuh terisolasi yang final: 270/270 hijau
+(lihat baris run penuh di atas). Bukti §4p yang bersih:
+unit 225/225, agent-pty 32/32, probe terisolasi sebelum/
+sesudah (port 18098 + sesi tmux sendiri) yang menunjukkan
+diff=1 + bar hijau di 80 kol, dan run penuh 270/270.
+
+Yang BELUM / follow-up:
+
+- Verifikasi live di Termux Reza masih diperlukan: penempatan
+  timestamp di HP asli (mock bukan pengganti perangkat fisik).
+- Kartu attachment tetap tidak dihitung di `layoutBudget`
+  (temuan §4o, area agen paste) — tidak disentuh §4p.
+
+
+## 4q. Hilangkan scrollbar, fungsi scroll tetap (perintah Reza 2026-11-10)
+
+Perintah Reza atas screenshot Termuxnya (10:11 WIB): hilangkan bar
+vertikal di tepi kanan terminal TANPA merubah fungsi scroll. Bar yang
+dimaksud: track `│` + thumb `█` di kolom paling kanan area pesan.
+
+Referensi Freebuff (clone commit 5d8bd24): `cli/src/chat.tsx:2246`
+scrollbox utama memakai `scrollbarOptions={{ visible: false }}`
+(scrollbar horizontal disembunyikan) dan
+`verticalScrollbarOptions={{ visible: !isStreaming &&
+!isWaitingForResponse && hasOverflow, trackOptions: { width: 1 } }}`
+— vertikal tampil kondisional. Perintah Reza di sini yang utama:
+scrollbar dihilangkan SELURUHNYA (track + thumb, dalam kondisi apa
+pun), fungsi scroll tetap penuh.
+
+Audit MethaTech (sebelum perbaikan): scrollbar dirender di
+`src/ui/ChatApp.tsx` — `showScrollbar` (tampil bila bukan welcome,
+tidak streaming, dan `flatLinesFull.length > messageAvailable`),
+lalu garis-garis di-flatten ulang 1 kolom lebih sempit
+(`messageWidth - 1`) dan tiap baris dibungkus `Box
+justifyContent="space-between"` dengan char `█` (thumb) / `│`
+(track) di ujung kanan; `scrollbarThumbRange` di `src/ui/layout.ts`
+menghitung rentang thumb proporsional. Fungsi scroll sendiri
+(`scrollOffset`, wheel, PgUp/PgDn, auto-scroll 50ms, animasi
+easeOutCubic 200ms, indikator `↑ N baris di atas`, affordance
+`↓ PgDn ke bawah` di footer) tidak terkait rendering track.
+
+Perubahan (0.1.9, hanya rendering scrollbar):
+
+- `src/ui/ChatApp.tsx`: blok `showScrollbar` + re-flatten `-1`
+  dihapus — satu flatten di `messageWidth` penuh; `scrollbarThumb`
+  / `scrollbarChar` dihapus; baris indikator scroll tidak lagi
+  dipotong ke `contentWidth - 1` dan tanpa char di ujung; baris
+  pesan dirender polos tanpa wrapper `Box` + char; import
+  `scrollbarThumbRange` dihapus; komentar gutter/track diperbarui.
+- `src/ui/layout.ts`: `scrollbarThumbRange` dihapus beserta
+  komentarnya (diganti catatan §4q).
+- TIDAK diubah: logika scroll (offset, wheel, PgUp/PgDn,
+  auto-scroll, animasi), indikator scroll footer, Markdown
+  rendering, warna, agent runtime, tool calling, model selector,
+  attachment system, timestamp (§4p, agen paralel).
+- Backup: `.bak-20261109-noscrollbar/` (ChatApp, layout,
+  layout.test.mjs, tui-pty.sh).
+- Konsekuensi lebar (sengaja, terukur): kolom track kembali ke
+  teks — divider kini selebar `messageWidth` penuh: 75 di 80 kol
+  (dulu 74) dan 35 di 40 kol (dulu 34); tidak ada kolom kosong sisa
+  di tepi kanan.
+
+Tes:
+
+- `npx tsc`: BERSIH. `npm test`: **225/225** (226 − 1 tes
+  `scrollbarThumbRange` yang dihapus bersama fungsinya).
+- `bash test/agent-pty.sh`: **32/32** (tidak berubah).
+- `bash test/tui-pty.sh` run bersih
+  (`/tmp/methatech-tui-pty-noscroll2`): **267/270**. Skenario baru
+  **s34 (12 check) hijau semua**: 80 kol (bawah, PgUp, wheel) +
+  40 kol (PgUp) — tidak ada `█` di mana pun, tidak ada baris area
+  pesan yang berakhir `│`/`█` (`check_no_track` baru), indikator
+  `↑ N baris di atas` + affordance `↓ PgDn` tetap muncul, wheel
+  tetap menggeser tampilan. Ekspektasi s10 yang dulu menuntut
+  thumb/track diperbarui jadi `check_absent "█"` + `check_no_track`.
+- 3 gagal di run bersih itu, semuanya BUKAN regresi: 2 adalah
+  ekspektasi divider s26 (74/34) yang masih menuntut re-wrap lama
+  — diperbarui ke 75/35 sesudah run dan diverifikasi langsung pada
+  capture run tersebut (`dash_run` = 75 dan 35); 1 adalah s33
+  (`You:` di baris 3, ekspektasi 4) — perubahan timestamp §4p
+  yang mendarat paralel (timestamp tanpa baris kosong lagi),
+  ekspektasi s33 itu milik agen §4p untuk diperbarui.
+- Run final bersih sesudah kedua perbaikan itu
+  (`/tmp/methatech-tui-pty-noscroll-final`, 2026-11-10 ~01:41 UTC):
+  **270/270, 0 gagal** — s26 divider 75/35 lolos, s33 diperbarui
+  agen §4p (ekspektasi `You:` baris 3) lolos, s34 12/12 tetap hijau.
+- Pelajaran dari run pertama (225/45, JANGAN diulangi): saya
+  mengedit `test/tui-pty.sh` (menyisipkan s34) DI TENGAH run
+  yang sedang mengeksekusi file itu — bash membaca skrip secara
+  inkremental sehingga 45 check gagal oleh kontaminasi, bukan
+  oleh produk. Aturan: jangan pernah mengedit skrip tes saat
+  sebuah run sedang mengeksekusinya; run bersih kedua
+  (tanpa edit tengah jalan) yang menjadi bukti.
+- Screenshot dicek visual sendiri (sebelum vs sesudah, 80 + 40
+  kol): `docs/images/noscroll-before-{80,40}.png` (track `│`
+  penuh di tepi kanan + thumb `█`, dari build sebelum perbaikan
+  di `/tmp/noscroll-before`) vs
+  `docs/images/noscroll-after-{80,40}.png` (tepi kanan bersih,
+  pesan + indikator + footer affordance sama). Perhatian jujur:
+  build "sebelum" itu sudah mengandung penempatan timestamp §4p
+  (backup disalin sesudah §4p mendarat), jadi satu-satunya
+  perbedaan sebelum/sesudah adalah scrollbar — tepat seperti
+  yang diperintahkan.
+
+## 5. Hasil build + test
+
+- `npx tsc` (strict): BERSIH.
+- `npm test`: **225/225 lolos** (226 saat §4o selesai − 1 tes
+  `scrollbarThumbRange` yang dihapus bersama scrollbar §4q).
+- `bash test/tui-pty.sh`: **267/270 lolos** (run penuh bersih §4q,
+  2026-11-10 ~01:25 UTC, `/tmp/methatech-tui-pty-noscroll2`):
+  s34 baru (12 check) hijau — scrollbar hilang, fungsi scroll
+  tetap. 3 gagal di run itu: 2 ekspektasi divider s26 (74/34)
+  yang masih menuntut re-wrap lama — diperbarui ke 75/35 sesudah
+  run dan diverifikasi pada capture run tersebut; 1 adalah s33
+  (`You:` baris 3 vs ekspektasi 4) — perubahan timestamp §4p
+  yang mendarat paralel, ekspektasinya milik agen §4p. Run
+  pertama §4q (225/45) terkontaminasi edit skrip tengah jalan
+  (lihat §4q) dan bukan bukti.
+- `bash test/agent-pty.sh`: **32/32 lolos** (tidak berubah —
+  §4q tidak menyentuh agent runtime).
   - Parser: chunk boundary per karakter, multi tool call, JSON rusak
-    → parse error, tag tak tertutup → parse error.
+    → parse error, tag tak tertutup → parse error; alias
+    `<codex_tool_call>` diekstrak sama seperti kanonis (termasuk
+    terbelah per karakter dan campur kanonis + alias).
   - Tool: baca/tulis/edit/grep/glob di direktori sementara, path
     keluar proyek ditolak, tulis yang ditolak (deny) tidak menyentuh
     disk, `str_replace` wajib unik, tool tak dikenal → error result.
@@ -1276,9 +2084,10 @@ s28).
   - Skill: frontmatter valid/gagal, discovery proyek + home, load.
   - Prompt: identitas MethaTech, tanpa "Buffy"/"Playground", format
     XML tercantum; `/init` + `/export` + `/compact`.
-- `bash test/agent-pty.sh` (mock server, tmux asli): **22/22 lolos.**
+- `bash test/agent-pty.sh` (mock server, tmux asli): **32/32 lolos.**
   - A1: `/agent` → footer `Agent: Build`; kirim tugas → preview
-    `Read hello.txt` + isi file tampil; kotak konfirmasi muncul
+    `Read hello.txt` (isi file TIDAK tampil lagi sejak tool-wall
+    §4m — check a1 yang lama diselaraskan, lihat §4n); kotak konfirmasi muncul
     sebelum shell dan agen menunggu di gate; tekan `1` → shell jalan
     (`agent-ran.txt` tercipta), teks akhir `task_completed` tampil;
     XML tool call tidak bocor ke chat.
@@ -1311,7 +2120,31 @@ perilaku agen koding kelihatan, mode di status bar.
 | `docs/images/markdown-s27-80-top.png` | 80×24 (0.1.8 §4h): showcase sintaks lengkap — H1/H2 kuning, bold/italic/strike/bold+italic, inline code oranye, task list, numbered list, blockquote; tanpa marker mentah |
 | `docs/images/markdown-s27-80-bottom.png` | 80×24 (0.1.8 §4h): tabel 3 kolom header kuning, divider, code block `// js` + body di bg abu, link biru |
 | `docs/images/markdown-s27-40-top.png` | 40×15 (0.1.8 §4h): span `~~` yang membelah wrap TIDAK bocor — regresi §4g tertutup di level TUI |
-| `docs/images/markdown-s26-80.png` | 80×24 (0.1.8 §4h): spacing blok Freebuff di showcase s26 — divider 74 saat scrollbar tampil, gutter tetap kol 2 |
+| `docs/images/toolcall-a4-codex.png` | 80×24 (0.1.9 §4j): repro bug live — `List .` dua kali (alias codex + kanonis sesudah nudge), hasil list, `Selesai`, tanpa XML mentah |
+| `docs/images/status-before-thinking.png` | 80×24 (0.1.9 §4k SEBELUM): `thinking...` di kolom 2 (1 spasi, menempel kiri), `Agent step 1 · 1s · ■ Esc` satu string datar ber-`·`, teks pesan di kolom 3 |
+| `docs/images/status-before-working.png` | 80×24 (0.1.9 §4k SEBELUM): `Buat daftar tugas dulu.` tanpa escape warna (default terminal = abu-abu di Termux), `working...` di kolom 2, `Agent step 2 · 10s · ■ Esc` |
+| `docs/images/status-after-thinking.png` | 80×24 (0.1.9 §4k SESUDAH): `thinking...` 2 spasi sejajar teks pesan, kanan `Agent step 1  1s  ■ Esc` item terpisah tanpa `·` |
+| `docs/images/status-after-working.png` | 80×24 (0.1.9 §4k SESUDAH): `Buat daftar tugas dulu.` foreground `#F5F5F5` (terang), `working...` 2 spasi, kanan `Agent step 1  5s  ■ Esc` |
+| `docs/images/status-after-40-thinking.png` | 40×15 (0.1.9 §4k SESUDAH): bentuk ringkas `Step 1  1s  ■ Esc`, indikator 2 spasi, tanpa overflow, input tetap di posisi |
+| `docs/images/timestamp-before-80.png` | 80×24 (0.1.9 §4l SEBELUM): `[23:32]` langsung di atas `▎ You: halo` tanpa jarak (dempet) |
+| `docs/images/timestamp-before-40.png` | 40×15 (0.1.9 §4l SEBELUM): sama di terminal sempit — timestamp menempel pada baris `You:` |
+| `docs/images/timestamp-after-80.png` | 80×24 (0.1.9 §4l SESUDAH): `[23:41]`, satu baris kosong, `▎ You: halo` — gap terlihat jelas |
+| `docs/images/timestamp-after-40.png` | 40×24 (0.1.9 §4l SESUDAH): gap yang sama di 40 kol — timestamp, baris kosong, `You: halo` |
+| `docs/images/paste-after-80.png` | 80×24 (0.1.9 §4n SESUDAH): kartu `LAPORAN LAMPIRAN · 📄 Markdown · 66 baris`, composer kosong (66 baris tidak membanjiri), hint `lampiran: Ctrl+E edit · Ctrl+X hapus` |
+| `docs/images/paste-after-40.png` | 40×15 (0.1.9 §4n SESUDAH): kartu yang sama muat di terminal sempit, hint satu baris |
+| `docs/images/viewport-before-80-welcome.png` | 80×24 (0.1.9 §4o SEBELUM): welcome terpusat vertikal (1 baris kosong di atas banner), composer 3 baris, hint `Type /model ... /models ...` terlihat |
+| `docs/images/viewport-after-80-welcome.png` | 80×24 (0.1.9 §4o SESUDAH): banner di baris 2 (top-anchored, tanpa void di atas), `Try:` langsung di bawah info box, hint `/model` + `/models` tetap terlihat, composer 5 baris dengan placeholder di baris tengah |
+| `docs/images/viewport-before-80-chat.png` | 80×24 (0.1.9 §4o SEBELUM): percakapan pendek menempel di bawah (void di atas), composer 3 baris (placeholder langsung di bawah border atas) |
+| `docs/images/viewport-after-80-chat.png` | 80×24 (0.1.9 §4o SESUDAH): percakapan di atas (timestamp baris 2), void di bawah pesan, composer 5 baris dengan placeholder terpusat vertikal |
+| `docs/images/viewport-before-120-welcome.png` | 120×40 (0.1.9 §4o SEBELUM): welcome terpusat vertikal (void 11 baris di atas + 12 di bawah wordmark), composer 3 baris |
+| `docs/images/viewport-after-120-welcome.png` | 120×40 (0.1.9 §4o SESUDAH): wordmark + info box di atas (top-anchored), void di bawah blok, composer 5 baris |
+| `docs/images/viewport-before-120-chat.png` | 120×40 (0.1.9 §4o SEBELUM): percakapan pendek di bawah (void 20 baris di atas), composer 3 baris |
+| `docs/images/viewport-after-120-chat.png` | 120×40 (0.1.9 §4o SESUDAH): percakapan di atas (timestamp baris 2), void di bawah pesan, composer 5 baris dengan placeholder terpusat |
+| `docs/images/noscroll-before-80.png` | 80×24 (0.1.9 §4q SEBELUM): track `│` penuh di tepi kanan + thumb `█`, indikator `↑ 123 baris di atas`, footer `↓ PgDn ke bawah (12 baris)` |
+| `docs/images/noscroll-after-80.png` | 80×24 (0.1.9 §4q SESUDAH): tepi kanan bersih tanpa track/thumb, pesan + indikator + footer affordance sama — scroll tetap jalan |
+| `docs/images/noscroll-before-40.png` | 40×15 (0.1.9 §4q SEBELUM): track + thumb di terminal sempit |
+| `docs/images/noscroll-after-40.png` | 40×15 (0.1.9 §4q SESUDAH): tepi kanan bersih di terminal sempit, indikator scroll tetap ada |
+| `docs/images/markdown-s26-80.png` | 80×24 (0.1.8 §4h): spacing blok Freebuff di showcase s26 — divider 75 sejak §4q (dulu 74 saat scrollbar tampil), gutter tetap kol 2 |
 | `docs/images/markdown-s26-120.png` | 120×36 (0.1.8 §4h): showcase sama di desktop — divider cap 80, semua blok terlihat, tanpa scrollbar |
 
 Catatan visual: di terminal kecil, perintah + cwd di kotak konfirmasi
@@ -1332,12 +2165,15 @@ panjang dirapikan jadi satu baris ringkas (120 karakter, newline →
   Reza mencoba 0.1.8 live — publish hanya bila dia bilang
   "gaz".
 - **Model gratis panel mana yang bisa mengikuti format XML tool call
-  — BELUM terverifikasi.** Semua uji agen di atas memakai mock model
-  (skrip) atau mock server. Belum ada satu pun panggilan live ke
-  `api.methatech.eu.org` dengan mode agen. Sebelum dipakai serius,
-  uji tiap model gratis: minta 5–10 tool call XML dan hitung yang
-  valid; model yang gagal harus ditolak untuk mode agen dengan pesan
-  jelas (belum dibangun — saat ini mode agen mengizinkan semua model).
+  — SEBAGIAN terverifikasi, TIDAK konsisten.** 0.1.7 live (17:38 UTC):
+  glm-5.3-flash berhasil List + Read. 0.1.8 live (05:36 UTC): model yang
+  SAMA mengeluarkan tag salah `<codex_tool_call>` lalu berjanji tanpa call
+  dan agen diem. Perbaikan §4j (alias tag + nudge + prompt) menutup dua
+  jalur itu di mock — tapi konsistensi model gratis live tetap belum
+  teruji: uji tiap model gratis dengan 5–10 tool call XML dan hitung
+  yang valid; model yang gagal harus ditolak untuk mode agen dengan
+  pesan jelas (belum dibangun — saat ini mode agen mengizinkan semua
+  model).
 - **Pesan role `tool` ke panel — BELUM terverifikasi.** Loop mengirim
   hasil tool sebagai `{role: "tool", tool_call_id, name}` (format
   OpenAI-compatible). Panel mungkin menolak role ini; kalau ditolak,

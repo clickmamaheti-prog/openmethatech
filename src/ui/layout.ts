@@ -16,6 +16,7 @@ import { splitMessageParts } from "./syntax.js";
 import { markdown, theme } from "../theme.js";
 import { sanitizeTerminalOutput, sanitizeTerminalText } from "./terminal-safe.js";
 import { cellWidth, textWidth } from "./cells.js";
+import { truncateEnd } from "./attachments.js";
 import { parseMarkdown, renderInlineText, renderMarkdownText, renderTable, wrapSegments } from "./markdown.js";
 import type { Table } from "mdast";
 
@@ -65,6 +66,26 @@ export const INPUT_PLACEHOLDER = "Enter a coding task or / for commands";
  */
 export function inputBoxRowsFor(inputContentRows: number, paletteRowsInside: number): number {
   return 2 + inputContentRows + paletteRowsInside;
+}
+
+/**
+ * Freebuff composer rest height (chat-input-bar.tsx: the inner content
+ * box has `minHeight: shouldCenterInputVertically ? 3 : undefined` and
+ * `justifyContent: shouldCenterInputVertically ? "center" : "flex-start"`,
+ * chat.tsx:2122-2123: shouldCenterInputVertically = !hasSuggestionMenu
+ * && !isMultilineInput). At rest — single-line draft, no suggestion menu
+ * open — the composer content area is 3 rows with the input line
+ * vertically centered, so the bordered box is 5 rows tall (3 + 2 borders).
+ * As soon as the draft wraps to 2+ rows or the palette opens, the box
+ * hugs the content instead. Callers pass the EFFECTIVE content rows
+ * (3 when centered, else the wrapped rows) to inputBoxRowsFor, so the
+ * budget math and the render agree exactly.
+ */
+export const COMPOSER_CENTERED_CONTENT_ROWS = 3;
+
+/** Whether the composer content area uses the centered 3-row rest height. */
+export function composerIsCentered(inputContentRows: number, paletteOpen: boolean): boolean {
+  return !paletteOpen && inputContentRows <= 1;
 }
 import { groupCatalog, visibleWindow } from "./picker.js";
 import { suggestionWindow } from "./suggestions.js";
@@ -248,6 +269,19 @@ export interface LayoutMessage {
     shell: boolean;
     results: { ok: boolean; text: string }[];
   };
+  /**
+   * Attachments sent with this user message (compact metadata only
+   * — the full content lives in the agent history). Rendered as one
+   * `📎 title · Type · N baris` line per attachment under the user
+   * block (Freebuff message-block.tsx renders its textAttachments
+   * as cards under the message).
+   */
+  attachments?: {
+    title: string;
+    contentType: string;
+    lineCount: number;
+    charCount: number;
+  }[];
 }
 
 /** Format an epoch-ms timestamp as [HH:MM] (local time). */
@@ -320,6 +354,7 @@ export function flattenMessages(
               preview: sanitizeTerminalText(raw.tool.preview),
               results: raw.tool.results.map((r) => ({ ...r, text: sanitizeTerminalOutput(r.text) })),
             },
+      attachments: raw.attachments?.map((a) => ({ ...a, title: sanitizeTerminalText(a.title) })),
     };
     const tsLine = m.ts !== undefined ? plainLine(formatTimestamp(m.ts), theme.muted) : null;
     if (m.kind === "tool") {
@@ -442,7 +477,24 @@ export function flattenMessages(
       // segments (wrapSegments), so a span can never leak across a
       // wrap boundary. The "You: " label (5 cols) comes out of the
       // first line's budget; continuation lines keep the border only.
-      if (tsLine) lines.push(tsLine);
+      // Freebuff message-block.tsx:187-194 — the MessageBlock root
+      // column has NO gap: its timestamp sits DIRECTLY above the
+      // text (single-block.tsx: marginTop={0}, marginBottom={0}).
+      // §4l added a blank line here ("gap 1") and Reza said it is
+      // TOO FAR ("kejauhan") — the timestamp must come down closer
+      // to the "You:" body. The element that keeps Freebuff's
+      // adjacency from reading cramped ("dempet") is the continuous
+      // vertical line: message-with-agents.tsx:236-252 renders the
+      // user bar with marginTop: 0, marginBottom: 0, so it spans the
+      // FULL message height INCLUDING the timestamp line — the
+      // timestamp is the header of the bordered block, not a floating
+      // line above it. MethaTech's bar previously started at the
+      // "You:" line only, so the timestamp floated bare above the
+      // block. Fix: no blank line (Freebuff placement, diff=1) AND
+      // the bar runs alongside the timestamp line too.
+      if (tsLine) {
+        lines.push({ segments: [...borderSegs, ...tsLine.segments] });
+      }
       const inner = Math.max(1, width - 2);
       const labelW = 5; // "You: "
       let firstLine = true;
@@ -461,6 +513,15 @@ export function flattenMessages(
           });
         });
         firstLine = false;
+      }
+      // Attachments sent with this message: one compact card line
+      // each, under the user text (Freebuff message-block.tsx
+      // renders textAttachments as cards under the message). The
+      // full content is NOT re-rendered here — it lives in the
+      // agent history; the history shows only the card line.
+      for (const a of m.attachments ?? []) {
+        const label = `📎 ${truncateEnd(a.title, Math.max(10, inner - 4))} · ${a.contentType} · ${a.lineCount} baris`;
+        lines.push({ segments: [...borderSegs, { text: label, color: theme.muted }] });
       }
     } else {
       // Freebuff message-block.tsx: the assistant block carries NO
@@ -563,7 +624,13 @@ export function flattenMessages(
           // message's own trailing blank line follows). The gap is
           // emitted once content has been emitted in this message,
           // so a leading newline never grows a leading blank line.
-          const rendered = renderMarkdownText(part.content, width);
+          // The assistant body renders in theme.text (Freebuff
+          // message-block.tsx:188: textColor ?? theme.foreground):
+          // without it plain paragraphs carry NO color and fall back
+          // to the terminal default foreground, which reads gray on
+          // Reza's Termux. Semantic elements keep their own colors
+          // (heading / inline code / link / blockquote / code block).
+          const rendered = renderMarkdownText(part.content, width, theme.text);
           if (rendered.lines.length === 0) {
             if ((rendered.endsBlank || rendered.startsBlank) && (emitted || pi > 0)) {
               pendingBlank = true;
@@ -661,24 +728,13 @@ export function easeOutCubic(t: number): number {
   return 1 - Math.pow(1 - t, 3);
 }
 
-/**
- * Scrollbar thumb range over the message-area rows (Freebuff
- * scrollbox vertical scrollbar, track width 1, shown only when the
- * content overflows): the thumb covers the visible window's share of
- * the total, at least one row, clamped inside [0, available).
- * Returns [start, end) row indexes; empty when there is no overflow.
- */
-export function scrollbarThumbRange(
-  total: number,
-  available: number,
-  startLine: number,
-  endLine: number,
-): { start: number; end: number } {
-  if (total <= available || available <= 0) return { start: 0, end: 0 };
-  const start = Math.floor((startLine / total) * available);
-  const end = Math.max(start + 1, Math.ceil((endLine / total) * available));
-  return { start: Math.max(0, start), end: Math.min(available, end) };
-}
+// 0.1.9 §4q: the scrollbar is removed (Reza's order — no track/thumb
+// column at the right edge). scrollbarThumbRange lived here (Freebuff
+// scrollbox vertical scrollbar, track width 1, proportional thumb);
+// it is deleted with the rendering. Freebuff's own scrollbox hides
+// its scrollbar too (chat.tsx:2246 scrollbarOptions visible: false).
+// The scroll FUNCTION (offset, wheel, PgUp/PgDn, auto-scroll,
+// easeOutCubic) is untouched.
 
 /**
  * Picker hint line: the full legend needs 48 columns; narrow
@@ -1052,7 +1108,12 @@ export function welcomeLayout(opts: WelcomeOptions): WelcomeLayout {
       ...banner.map((row) => centerText(row, contentWidth, theme.accent, true)),
       blankLine(),
       ...boxLines(infoContent, contentWidth),
-      blankLine(),
+      // 0.1.9 §4o: NO blank row between the info box and the "Try:"
+      // label here — the narrow branch never had one, and the banner
+      // content is 17 rows while the message area at 80x24 is only 16
+      // rows with the 5-row centered composer, so the extra blank pushed
+      // the hint row (with /model + /models) off the bottom. 16 rows
+      // now fit exactly.
       ...(showStarters
         ? [
             centerLine(label, contentWidth),
@@ -1076,10 +1137,13 @@ export function welcomeLayout(opts: WelcomeOptions): WelcomeLayout {
   }
 
   const slack = avail - content.length;
-  // Ceil: an odd slack row goes on top, so the wordmark banner stays
-  // centered (row 3 at 80x24) instead of dropping to row 2 when the
-  // input box grows by one row.
-  const topPad = Math.max(0, Math.ceil(slack / 2));
+  // Freebuff top-anchors the welcome header: it is the FIRST child of
+  // the scrollbox (chat.tsx:2243 <scrollbox ...> — Header above the
+  // messages, justifyContent flex-start), so the empty space sits BELOW
+  // the welcome block, inside the conversation viewport, never above it.
+  // 0.1.9 §4o: topPad was ceil(slack/2) (vertically centered welcome —
+  // the void split above AND below the wordmark at tall terminals).
+  const topPad = 0;
   const bottomPad = Math.max(0, slack - topPad);
   const rows: VisualLine[] = [
     ...Array.from({ length: topPad }, () => blankLine()),

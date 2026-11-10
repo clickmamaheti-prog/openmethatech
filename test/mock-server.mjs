@@ -7,6 +7,7 @@
 // (heading, italic, strikethrough, task list, blockquote, table,
 // divider, inline code, link) for the tui-pty s25 scenario.
 import http from "node:http";
+import { appendFileSync } from "node:fs";
 
 const PORT = Number(process.env.MOCK_PORT ?? process.argv[2] ?? 18099);
 let agentReq = 0;
@@ -48,13 +49,46 @@ const server = http.createServer((req, res) => {
     return send(200, { total_usage: 5000 });
   }
   if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
-    // Canned SSE stream: two deltas + usage in the final chunk.
-    res.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-    });
-    // MOCK_AGENT=1: scripted agent run (one full response per request,
+    // MOCK_ATTACHMENT=1: large-paste attachment proof (0.1.9 §4n).
+    // Read the request body, capture the last user message verbatim
+    // to MOCK_CAPTURE_FILE (one JSON line per request), and reply
+    // with a plain-text receipt stating how many [Pasted Text]
+    // characters/lines arrived plus a snippet from the MIDDLE of
+    // the first pasted section — so the PTY test can prove the
+    // whole attachment reached the agent, not just its prefix.
+    // The reply carries no tool calls, so the agent loop ends the
+    // turn after one step (one request per send).
+    const respond = (capturedUser) => {
+      // Canned SSE stream: two deltas + usage in the final chunk.
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      });
+      let chunks;
+      if (process.env.MOCK_ATTACHMENT) {
+        const sections = capturedUser.split("[Pasted Text]\n").slice(1);
+        const totalChars = sections.reduce((n, s) => n + s.length, 0);
+        const totalLines = sections.reduce((n, s) => n + s.split("\n").length, 0);
+        const mid =
+          sections.length > 0
+            ? sections[0].slice(
+                Math.floor(sections[0].length / 2),
+                Math.floor(sections[0].length / 2) + 40,
+              )
+            : "";
+        const reply =
+          sections.length > 0
+            ? `Lampiran diterima: ${totalChars} karakter, ${totalLines} baris.\nTengah lampiran: ${mid}`
+            : "Tidak ada lampiran yang diterima.";
+        chunks = [
+          { choices: [{ delta: { content: reply } }] },
+          {
+            choices: [{ delta: {}, finish_reason: "stop" }],
+            usage: { prompt_tokens: 10, completion_tokens: 8, total_tokens: 18 },
+          },
+        ];
+      } else if (process.env.MOCK_CODEX) {
     // split into small chunks so the XML parser is exercised mid-stream):
     // 1st request: write_todos (Freebuff shape {task, completed}) ·
     // 2nd: read_files hello.txt · 3rd: str_replace with a replacements
@@ -63,10 +97,39 @@ const server = http.createServer((req, res) => {
     // like Freebuff) · 6th: task_completed + final text with a heading,
     // inline code and a link (Freebuff markdown palette).
     // Later requests: plain final text.
-    let chunks;
-    if (process.env.MOCK_AGENT) {
+    // MOCK_CODEX=1: live bug 2026-11-09 repro (Reza Termux,
+    // glm-5.3-flash): 1st request emits the <codex_tool_call> alias
+    // tag for list_directory; 2nd promises tool use with NO call
+    // ("saya cek proyeknya sekarang") so the loop must nudge; 3rd
+    // complies with a canonical list_directory call; 4th task_completed.
       agentReq += 1;
       const texts = [
+        `Baik, saya cek isi proyek dulu.\n<codex_tool_call>\n{"cb_tool_name": "list_directory", "path": "."}\n</codex_tool_call>`,
+        `Haha, oke oke, saya cek proyeknya sekarang.`,
+        `<codebuff_tool_call>\n{"cb_tool_name": "list_directory", "path": "."}\n</codebuff_tool_call>`,
+        `<codebuff_tool_call>\n{"cb_tool_name": "task_completed", "summary": "selesai"}\n</codebuff_tool_call>\n# Selesai\nIsi proyek sudah dicek.`,
+      ];
+      const full = texts[Math.min(agentReq - 1, texts.length - 1)];
+      chunks = [];
+      for (let i = 0; i < full.length; i += 17) {
+        chunks.push({ choices: [{ delta: { content: full.slice(i, i + 17) } }] });
+      }
+      chunks.push({
+        choices: [{ delta: {}, finish_reason: "stop" }],
+        usage: { prompt_tokens: 10, completion_tokens: 8, total_tokens: 18 },
+      });
+    } else if (process.env.MOCK_AGENT) {
+      agentReq += 1;
+      // MOCK_AGENT_BIG=1: short script for the tool-wall test (0.1.9
+      // §4m) — read one big file, then complete. The read target is
+      // big.txt in the TUI's cwd; the file content must never reach
+      // the screen (Freebuff shows only `Read <paths>`).
+      const texts = process.env.MOCK_AGENT_BIG
+        ? [
+            `Baca file besar dulu.\n<codebuff_tool_call>\n{"cb_tool_name": "read_files", "paths": ["big.txt"]}\n</codebuff_tool_call>`,
+            `<codebuff_tool_call>\n{"cb_tool_name": "task_completed", "summary": "selesai"}\n</codebuff_tool_call>\n# Selesai\nFile besar sudah dibaca.`,
+          ]
+        : [
         `Buat daftar tugas dulu.\n<codebuff_tool_call>\n{"cb_tool_name": "write_todos", "todos": [{"task": "Baca hello.txt", "completed": false}, {"task": "Edit hello.txt", "completed": false}, {"task": "Jalankan perintah", "completed": false}]}\n</codebuff_tool_call>`,
         `Membaca file dulu.\n<codebuff_tool_call>\n{"cb_tool_name": "read_files", "paths": ["hello.txt"]}\n</codebuff_tool_call>`,
         `Edit file.\n<codebuff_tool_call>\n{"cb_tool_name": "str_replace", "path": "hello.txt", "replacements": [{"oldString": "isi hello untuk agen", "newString": "isi hello sudah diedit agen"}]}\n</codebuff_tool_call>`,
@@ -166,6 +229,38 @@ const server = http.createServer((req, res) => {
       }
     };
     setTimeout(sendNext, firstDelay);
+    };
+    if (process.env.MOCK_ATTACHMENT) {
+      let body = "";
+      req.on("data", (c) => {
+        body += c;
+      });
+      req.on("end", () => {
+        let userContent = "";
+        try {
+          const parsed = JSON.parse(body);
+          const msgs = parsed.messages ?? [];
+          const lastUser = [...msgs].reverse().find((m) => m.role === "user");
+          userContent =
+            typeof lastUser?.content === "string"
+              ? lastUser.content
+              : JSON.stringify(lastUser?.content ?? "");
+        } catch {
+          userContent = "";
+        }
+        const captureFile =
+          process.env.MOCK_CAPTURE_FILE ?? "/tmp/methatech-attachment-capture.jsonl";
+        try {
+          appendFileSync(captureFile, JSON.stringify({ userContent }) + "\n");
+        } catch {
+          // Capture is test evidence only; a failed write must not
+          // break the mocked response.
+        }
+        respond(userContent);
+      });
+      return;
+    }
+    respond("");
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/device/code") {

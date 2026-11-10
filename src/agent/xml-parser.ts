@@ -24,8 +24,19 @@ export const TOOL_XML_NAME = "codebuff_tool_call";
 export const TOOL_NAME_PARAM = "cb_tool_name";
 export const ENDS_AGENT_STEP_PARAM = "cb_easp";
 
-const START_TAG = `<${TOOL_XML_NAME}>`;
-const END_TAG = `</${TOOL_XML_NAME}>`;
+/**
+ * Tag names a model may emit for a tool call. The canonical name is
+ * codebuff_tool_call; codex_tool_call is the alias a free model emits
+ * live (glm-5.3-flash, 2026-11-09: `<codex_tool_call>` with an
+ * identical {"cb_tool_name": ...} JSON body). The body format is the
+ * same, so both tags parse to the same call. Before this alias existed
+ * the codex block passed through as visible text and the turn ended
+ * with "no more tool calls" — the model's intent silently lost.
+ */
+export const TOOL_XML_ALIASES = ["codex_tool_call"] as const;
+
+const START_TAGS = [`<${TOOL_XML_NAME}>`, ...TOOL_XML_ALIASES.map((a) => `<${a}>`)];
+const END_TAGS = [`</${TOOL_XML_NAME}>`, ...TOOL_XML_ALIASES.map((a) => `</${a}>`)];
 
 export interface ParsedToolCall {
   toolName: string;
@@ -68,26 +79,26 @@ export function parseStreamChunk(chunk: string, state: StreamParserState): Parse
 
   while (text.length > 0) {
     if (state.insideToolCall) {
-      const endIndex = text.indexOf(END_TAG);
+      const endIndex = earliestIndex(text, END_TAGS);
       if (endIndex !== -1) {
         const content = text.slice(0, endIndex);
         const parsed = parseToolCallContent(content);
         if (parsed) toolCalls.push(parsed);
         else if (content.trim().length > 0) parseErrors.push(content.trim().slice(0, 500));
-        text = text.slice(endIndex + END_TAG.length);
+        text = text.slice(endIndex + matchedTagLength(text, endIndex, END_TAGS));
         state.insideToolCall = false;
       } else {
         state.buffer = text;
         text = "";
       }
     } else {
-      const startIndex = text.indexOf(START_TAG);
+      const startIndex = earliestIndex(text, START_TAGS);
       if (startIndex !== -1) {
         filteredText += text.slice(0, startIndex);
-        text = text.slice(startIndex + START_TAG.length);
+        text = text.slice(startIndex + matchedTagLength(text, startIndex, START_TAGS));
         state.insideToolCall = true;
       } else {
-        const partial = findPartialTagMatch(text, START_TAG);
+        const partial = findPartialTagMatchAny(text, START_TAGS);
         if (partial > 0) {
           filteredText += text.slice(0, -partial);
           state.buffer = text.slice(-partial);
@@ -101,6 +112,34 @@ export function parseStreamChunk(chunk: string, state: StreamParserState): Parse
   }
 
   return { filteredText, toolCalls, parseErrors };
+}
+
+/** Index of the earliest occurrence of any tag, or -1. */
+function earliestIndex(text: string, tags: string[]): number {
+  let best = -1;
+  for (const t of tags) {
+    const i = text.indexOf(t);
+    if (i !== -1 && (best === -1 || i < best)) best = i;
+  }
+  return best;
+}
+
+/** Length of the tag that starts at `index` (one of `tags` matches there). */
+function matchedTagLength(text: string, index: number, tags: string[]): number {
+  for (const t of tags) {
+    if (text.startsWith(t, index)) return t.length;
+  }
+  return 0;
+}
+
+/** Longest suffix of `text` that is a prefix of any tag (chunk boundary). */
+function findPartialTagMatchAny(text: string, tags: string[]): number {
+  let best = 0;
+  for (const tag of tags) {
+    const m = findPartialTagMatch(text, tag);
+    if (m > best) best = m;
+  }
+  return best;
 }
 
 /** Parse the JSON body of one closed tag. Null when not valid tool JSON. */
@@ -139,7 +178,7 @@ export function parseFullText(text: string): ParseResult {
   // A dangling unclosed tag holds its content in the buffer; surface it
   // as a parse error instead of silently dropping the model's intent.
   if (state.insideToolCall && state.buffer.trim().length > 0) {
-    result.parseErrors.push(`unclosed <${TOOL_XML_NAME}> tag: ${state.buffer.trim().slice(0, 500)}`);
+    result.parseErrors.push(`unclosed tool-call tag: ${state.buffer.trim().slice(0, 500)}`);
   }
   return result;
 }

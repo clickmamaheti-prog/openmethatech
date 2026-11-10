@@ -105,6 +105,9 @@ export interface KeyboardState {
   /** First Ctrl+C already pressed: the next Ctrl+C within 2s exits
       (Freebuff ChatKeyboardState.nextCtrlCWillExit). */
   nextCtrlCWillExit: boolean;
+  /** Number of pending large-paste text attachments on the composer
+      (Ctrl+X / Ctrl+E act on them; 0 disables both). */
+  attachmentsCount: number;
 }
 
 export type KeyboardAction =
@@ -136,7 +139,12 @@ export type KeyboardAction =
   | { type: "newline" }
   | { type: "type"; text: string }
   | { type: "backspace" }
-  | { type: "paste" };
+  | { type: "paste" }
+  /** Remove the most recent pending attachment card (Ctrl+X). */
+  | { type: "attachment-remove-last" }
+  /** Expand the most recent attachment back into the draft for
+      editing and drop its card (Ctrl+E). */
+  | { type: "attachment-edit-last" };
 
 const hasModifier = (key: ResolverKey): boolean =>
   Boolean(key.ctrl || key.meta);
@@ -160,6 +168,7 @@ export function createDefaultKeyboardState(): KeyboardState {
     historyNavDownEnabled: false,
     lastEditDueToNav: false,
     nextCtrlCWillExit: false,
+    attachmentsCount: 0,
   };
 }
 
@@ -174,6 +183,8 @@ export function resolveKeyboardAction(
   const isCtrlQ = key.ctrl === true && inputKey === "q" && !key.meta;
   const isCtrlT = key.ctrl === true && inputKey === "t" && !key.meta;
   const isCtrlJ = key.ctrl === true && inputKey === "j";
+  const isCtrlX = key.ctrl === true && inputKey === "x" && !key.meta;
+  const isCtrlE = key.ctrl === true && inputKey === "e" && !key.meta;
   const isBackspace = key.backspace === true || key.delete === true;
   const isUp = key.upArrow === true && !hasModifier(key);
   const isDown = key.downArrow === true && !hasModifier(key);
@@ -321,6 +332,17 @@ export function resolveKeyboardAction(
 
   // Priority 11: Ctrl+T toggles all Thinking blocks collapsed/expanded.
   if (isCtrlT) return { type: "toggle-thinking" };
+
+  // Priority 11.5: attachment cards (Ctrl+X remove / Ctrl+E edit
+  // the most recent card). Freebuff has no keyboard path here — its
+  // cards are mouse-clickable (attachment-card.tsx X button) — and
+  // MethaTech has no click hit-test, so these chords are the
+  // keyboard equivalent. Gated on attachmentsCount, so with no
+  // cards both chords fall through to `none` below. The picker
+  // block above already returned `none` for non-Ctrl+C keys, so
+  // with the picker open both are inert until it closes.
+  if (isCtrlX && state.attachmentsCount > 0) return { type: "attachment-remove-last" };
+  if (isCtrlE && state.attachmentsCount > 0) return { type: "attachment-edit-last" };
 
   // Priority 14: PgUp/PgDn scroll the message history.
   if (isPageUp) return { type: "scroll-up" };

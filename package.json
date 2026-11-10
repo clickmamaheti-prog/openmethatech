@@ -1,6 +1,6 @@
 {
   "name": "@methatech-cli/cli",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "MethaTech CLI — chat with MethaTech models from your terminal",
   "type": "module",
   "files": [

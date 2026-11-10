@@ -923,15 +923,24 @@ export interface MarkdownTextResult {
  * Parse-first: the whole part goes through remark, blocks render
  * from the AST, inline spans wrap as styled segments. No raw
  * Markdown marker can leak, at any width.
+ *
+ * `baseColor` is the message's foreground: Freebuff
+ * message-block.tsx:188 passes `textColor ?? theme.foreground`
+ * into its blocks renderer, and plain `text` nodes inherit it
+ * (markdown-renderer.tsx case 'text' returns the raw string with
+ * no color of its own). Without it the plain paragraph segments
+ * carry NO color and Ink renders the terminal default foreground
+ * (gray on Reza's Termux) — only semantic elements (heading,
+ * inline code, link, blockquote, code block) set their own colors.
  */
-export function renderMarkdownText(text: string, width: number): MarkdownTextResult {
+export function renderMarkdownText(text: string, width: number, baseColor?: string): MarkdownTextResult {
   const startsBlank = /^\s*\n/.test(text);
   const endsBlank = /\n\s*$/.test(text);
   const root = parseMarkdown(text);
   applyInlineFallbackFormatting(root);
   const first = root.children[0] as MarkdownNode | undefined;
   const startsTight = first !== undefined && isTightFollowupType(first.type);
-  let lines = renderBlocks(root.children as MarkdownNode[], width, {});
+  let lines = renderBlocks(root.children as MarkdownNode[], width, { baseColor });
   // Trailing blank lines are the message's own (flattenMessages
   // appends one blank line per message); drop them here.
   while (lines.length > 0) {
