@@ -3,6 +3,39 @@
 All notable changes to `@methatech-cli/cli`. Versions are published to npm
 as `@methatech-cli/cli`.
 
+## [0.1.11] — 2026-11-10
+
+TUI layout restore on top of the 0.1.10 ContentBlock fix. The conversation
+header is now persistent, adopted from the original Freebuff source
+(CodebuffAI/freebuff, commit `5d8bd24`, `cli/src/chat.tsx` — the header is
+a permanent first child of the scrollbox). No runtime, provider, or model
+changes.
+
+### TUI layout restore
+
+- **Persistent conversation header:** the welcome info card now stays
+  above the conversation once the first message is sent (its session line
+  switches from "Pesan pertama memulai sesi." to "Sesi aktif.", following
+  Freebuff's `freebuff-chat-header.tsx` conditional). Before the fix the
+  whole welcome block vanished on the first message and the conversation
+  jumped to the top of a mostly empty viewport.
+- **ASCII banner deleted entirely** on Reza's order ("gausah pake code
+  ASCII lah, hapus aja"): the block-letter "METHA TECH" wordmark
+  (`BANNER_FONT`, `BANNER_ROWS`, `bannerLines()`, `centerText()`) is
+  removed from the source; the welcome screen is now the info card alone
+  plus the "Try:" starters and the hint, top-anchored and proportional on
+  small terminals.
+- **Header is render-only:** `/export` and `/compact` read the message
+  list, never the header rows; the ContentBlock turn order and the
+  `/export` after `/compact` behaviour from 0.1.10 are unchanged.
+- **Regression tests:** PTY scenarios s13, s14, s33, and s35 now assert
+  the persistent header (card rows 2–6, first timestamp row 7, "You:"
+  row 8); s27's numbered-list check moved to the mid capture; the
+  `start_tui` sleep went from 2s to 3s to fix a startup race flake.
+
+Validation: `npx tsc` clean; `npm test` **428/428**; `test/agent-pty.sh`
+**32/32**; `test/tui-pty.sh` **297/297**.
+
 ## [0.1.10] — 2026-11-10
 
 TUI interaction and conversation rendering fixes on top of the 0.1.9

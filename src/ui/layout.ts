@@ -925,31 +925,13 @@ export function wheelScrollOffset(
 // Welcome / empty state — shown only while there are no messages yet.
 // Freebuff fills its first screen with content (logo, info box,
 // suggestions) instead of leaving the viewport empty; MethaTech does
-// the same with its own identity. Pure functions, unit-tested.
+// the same with its own identity (info box + suggestions, no ASCII
+// art — the block-letter wordmark was REMOVED entirely on Reza's
+// order 2026-11-10 "gausah pake code ASCII lah, hapus aja").
+// Pure functions, unit-tested.
 // The result is EXACTLY `available` rows (top pad + content +
 // bottom pad) so the root stays exactly `rows` tall.
 // ---------------------------------------------------------------------------
-
-/** 5-row block font for the MethaTech wordmark (desktop welcome). */
-const BANNER_FONT: Record<string, string[]> = {
-  M: ["M   M", "MM MM", "M M M", "M   M", "M   M"],
-  E: ["EEEEE", "E    ", "EEEE ", "E    ", "EEEEE"],
-  T: ["TTTTT", "  T  ", "  T  ", "  T  ", "  T  "],
-  H: ["H   H", "H   H", "HHHHH", "H   H", "H   H"],
-  A: ["  A  ", " A A ", "AAAAA", "A   A", "A   A"],
-  C: [" CCCC", "C    ", "C    ", "C    ", " CCCC"],
-};
-const BANNER_ROWS = 5;
-
-/** Block-letter rows for a word ("MethaTech" -> 5 rows, 53 cols). */
-export function bannerLines(word: string): string[] {
-  const rows: string[] = Array.from({ length: BANNER_ROWS }, () => "");
-  for (const ch of word.toUpperCase()) {
-    const glyph = BANNER_FONT[ch] ?? Array.from({ length: BANNER_ROWS }, () => "     ");
-    for (let i = 0; i < BANNER_ROWS; i++) rows[i] += (rows[i] ? " " : "") + glyph[i];
-  }
-  return rows;
-}
 
 /** Terminal cell width of a line (sum of its segments). */
 function lineLength(line: VisualLine): number {
@@ -960,11 +942,6 @@ function lineLength(line: VisualLine): number {
 function centerLine(line: VisualLine, width: number): VisualLine {
   const pad = Math.max(0, Math.floor((width - lineLength(line)) / 2));
   return { segments: [{ text: " ".repeat(pad) }, ...line.segments] };
-}
-
-/** Center a plain string as a colored, optionally bold line. */
-function centerText(text: string, width: number, color?: string, bold?: boolean): VisualLine {
-  return centerLine({ segments: [{ text, color, bold }] }, width);
 }
 
 /**
@@ -1045,22 +1022,37 @@ export const STARTER_PROMPTS: readonly { label: string; shortLabel: string; prom
 export interface WelcomeLayout {
   /** Exactly `available` rows: top pad + content + bottom pad. */
   rows: VisualLine[];
-  /** Whether the block-letter wordmark is used (false = plain text). */
-  banner: boolean;
+}
+
+/** Options for the persistent conversation header (headerLayout). */
+export interface HeaderOptions {
+  /** Content width (columns - 4). */
+  contentWidth: number;
+  /** Active model id. */
+  model: string;
+  /** True when the active model is FREE. */
+  free: boolean;
+  /** e.g. "$0.25 / $1.00 per 1M" (null when no price). */
+  priceText: string | null;
+  /** Balance in dollars (null when unknown). */
+  balanceUsd: number | null;
+  /** True once at least one message exists in the conversation. */
+  hasMessages: boolean;
 }
 
 /**
- * Build the welcome / empty state. Full variant (block wordmark +
- * breathing blanks) when there is room; compact variant (plain
- * wordmark, no blanks) on short or narrow terminals. The content is
- * sliced if the terminal is shorter than the compact form.
+ * Info box content lines (shared by the welcome block and the
+ * persistent header): session line, active model (+ price), balance.
+ * The session line follows Freebuff's FreebuffChatHeader conditional
+ * (freebuff-chat-header.tsx: session active -> 'Session active',
+ * else 'Your first message starts the session.'): before the first
+ * message it invites the user in; once the conversation exists it
+ * states the session is active — the old "Pesan pertama memulai
+ * sesi." must not linger above a running conversation.
+ * The wide model line is used only when the box still fits the width.
  */
-export function welcomeLayout(opts: WelcomeOptions): WelcomeLayout {
-  const { available, contentWidth, model, free, priceText, balanceUsd } = opts;
-  const showStarters = opts.showStarters !== false;
-  const avail = Math.max(0, available);
-
-  // Info box content: first message, active model (+ price), balance.
+function infoBoxContent(opts: HeaderOptions): VisualLine[] {
+  const { contentWidth, model, free, priceText, balanceUsd, hasMessages } = opts;
   const balanceText = balanceUsd === null ? "—" : `$${balanceUsd.toFixed(4)}`;
   const modelWide: VisualLine = {
     segments: [
@@ -1081,7 +1073,7 @@ export function welcomeLayout(opts: WelcomeOptions): WelcomeLayout {
     ],
   };
   const infoContent: VisualLine[] = [
-    { segments: [{ text: "Pesan pertama memulai sesi.", color: theme.text }] },
+    { segments: [{ text: hasMessages ? "Sesi aktif." : "Pesan pertama memulai sesi.", color: theme.text }] },
     modelWide,
     {
       segments: [
@@ -1093,6 +1085,38 @@ export function welcomeLayout(opts: WelcomeOptions): WelcomeLayout {
   // Use the wide model line only if the box still fits the width.
   const wideInner = Math.max(0, ...infoContent.map(lineLength));
   if (wideInner + 4 > contentWidth) infoContent[1] = modelNarrow;
+  return infoContent;
+}
+
+/**
+ * Persistent conversation header (Freebuff chat.tsx:2243-2275 — the
+ * header is a PERMANENT first child of the scrollbox, not an
+ * empty-state-only branch: it stays above the messages and only
+ * scrolls away naturally once the conversation overflows the
+ * viewport). The header is the welcome card alone — the ASCII
+ * wordmark was removed entirely on Reza's order 2026-11-10 — so it
+ * is exactly the 5-row info box (top border, 3 content lines,
+ * bottom border). ChatApp prepends these rows to the flattened
+ * message lines before windowing, so PgUp/PgDn, auto-scroll and the
+ * scroll indicator treat the header as the first lines of the
+ * scrollable content, exactly like Freebuff's header inside the
+ * scrollbox. Never used for /export or /compact (those read the
+ * message list, not the rendered lines).
+ */
+export function headerLayout(opts: HeaderOptions): VisualLine[] {
+  return boxLines(infoBoxContent(opts), opts.contentWidth);
+}
+
+/**
+ * Build the welcome / empty state: the info box (headerLayout, no
+ * messages yet) + the "Try:" starter prompts + the short /model +
+ * /models hint, top-anchored. The content is sliced if the terminal
+ * is shorter than the compact form.
+ */
+export function welcomeLayout(opts: WelcomeOptions): WelcomeLayout {
+  const { available, contentWidth, model, free, priceText, balanceUsd } = opts;
+  const showStarters = opts.showStarters !== false;
+  const avail = Math.max(0, available);
 
   const suggestions: VisualLine[] = showStarters
     ? (contentWidth >= 60 ? STARTER_PROMPTS : STARTER_PROMPTS.slice(0, 2)).map((s, i) => ({
@@ -1103,9 +1127,6 @@ export function welcomeLayout(opts: WelcomeOptions): WelcomeLayout {
       }))
     : [];
 
-  const banner = bannerLines("MethaTech");
-  const bannerWidth = banner[0]?.length ?? 0;
-  const useBanner = avail >= 16 && bannerWidth <= contentWidth;
   const label: VisualLine = {
     segments: [{ text: "Try:", color: theme.secondary, bold: true }],
   };
@@ -1131,40 +1152,19 @@ export function welcomeLayout(opts: WelcomeOptions): WelcomeLayout {
           ],
         };
 
-  let content: VisualLine[];
-  if (useBanner) {
-    content = [
-      ...banner.map((row) => centerText(row, contentWidth, theme.accent, true)),
-      blankLine(),
-      ...boxLines(infoContent, contentWidth),
-      // 0.1.9 §4o: NO blank row between the info box and the "Try:"
-      // label here — the narrow branch never had one, and the banner
-      // content is 17 rows while the message area at 80x24 is only 16
-      // rows with the 5-row centered composer, so the extra blank pushed
-      // the hint row (with /model + /models) off the bottom. 16 rows
-      // now fit exactly.
-      ...(showStarters
-        ? [
-            centerLine(label, contentWidth),
-            ...suggestions.map((s) => centerLine(s, contentWidth)),
-            centerLine(hint, contentWidth),
-          ]
-        : []),
-    ];
-  } else {
-    content = [
-      centerText("MethaTech", contentWidth, theme.accent, true),
-      ...boxLines(infoContent, contentWidth),
-      ...(showStarters
-        ? [
-            centerLine(label, contentWidth),
-            ...suggestions.map((s) => centerLine(s, contentWidth)),
-            centerLine(hint, contentWidth),
-          ]
-        : []),
-    ];
-  }
-
+  // 0.1.9 §4o: NO blank row between the info box and the "Try:"
+  // label — the content is 10 rows while the message area at 80x24
+  // is 16 rows, so the block fits with slack below.
+  const content: VisualLine[] = [
+    ...headerLayout({ contentWidth, model, free, priceText, balanceUsd, hasMessages: false }),
+    ...(showStarters
+      ? [
+          centerLine(label, contentWidth),
+          ...suggestions.map((s) => centerLine(s, contentWidth)),
+          centerLine(hint, contentWidth),
+        ]
+      : []),
+  ];
   const slack = avail - content.length;
   // Freebuff top-anchors the welcome header: it is the FIRST child of
   // the scrollbox (chat.tsx:2243 <scrollbox ...> — Header above the
@@ -1181,5 +1181,5 @@ export function welcomeLayout(opts: WelcomeOptions): WelcomeLayout {
   ].slice(0, avail);
   // Exact budget: pad the tail with blanks if slicing cut rows.
   while (rows.length < avail) rows.push(blankLine());
-  return { rows, banner: useBanner };
+  return { rows };
 }

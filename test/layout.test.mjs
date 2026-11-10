@@ -3,7 +3,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  bannerLines,
   breakpoints,
   wrapText,
   wrapLineCount,
@@ -19,6 +18,7 @@ import {
   paletteMaxRowsFor,
   paletteRenderedRows,
   welcomeLayout,
+  headerLayout,
   composerIsCentered,
   COMPOSER_CENTERED_CONTENT_ROWS,
   windowLines,
@@ -575,15 +575,7 @@ test("wheelScrollOffset: 1 line per wheel tick, clamped both ends", () => {
   assert.equal(wheelScrollOffset(5, "down", 3, 10, 30), 2);
   assert.equal(wheelScrollOffset(0, "up", 0, 10, 30), 0); // 0 lines = noop
 });
-test("bannerLines: MethaTech wordmark, 5 rows, uniform width", () => {
-  const rows = bannerLines("MethaTech");
-  assert.equal(rows.length, 5);
-  assert.ok(rows.every((r) => r.length === 53), `banner rows must be 53 wide, got ${rows.map((r) => r.length)}`);
-  assert.ok(rows[0].includes("M   M"));
-  assert.ok(rows[2].includes("HHHHH"));
-});
-
-test("welcomeLayout: desktop 80x24 — exact budget, banner, content", () => {
+test("welcomeLayout: desktop 80x24 — exact budget, card, content (no ASCII banner, Reza 2026-11-10)", () => {
   const w = welcomeLayout({
     available: 21,
     contentWidth: 76,
@@ -593,9 +585,9 @@ test("welcomeLayout: desktop 80x24 — exact budget, banner, content", () => {
     balanceUsd: 0.4855,
   });
   assert.equal(w.rows.length, 21, "welcome must fill exactly the message budget");
-  assert.equal(w.banner, true);
   const text = w.rows.map((l) => l.segments.map((s) => s.text).join("")).join("\n");
-  assert.ok(text.includes("M   M"), "block wordmark renders");
+  assert.ok(!text.includes("M   M"), "no ASCII banner rows");
+  assert.ok(!text.includes("EEEEE"), "no ASCII banner rows");
   assert.ok(text.includes("Pesan pertama memulai sesi."));
   assert.ok(text.includes("glm-5.3-flash"));
   assert.ok(text.includes("FREE $0.00"));
@@ -607,7 +599,7 @@ test("welcomeLayout: desktop 80x24 — exact budget, banner, content", () => {
   assert.ok(text.includes("╭"), "info box has a round border");
 });
 
-test("welcomeLayout: small 40x15 — exact budget, plain wordmark, no overflow", () => {
+test("welcomeLayout: small 40x15 — exact budget, plain card, no overflow", () => {
   const w = welcomeLayout({
     available: 11,
     contentWidth: 36,
@@ -617,10 +609,9 @@ test("welcomeLayout: small 40x15 — exact budget, plain wordmark, no overflow",
     balanceUsd: 0.4855,
   });
   assert.equal(w.rows.length, 11);
-  assert.equal(w.banner, false);
   const lines = w.rows.map((l) => l.segments.map((s) => s.text).join(""));
   const text = lines.join("\n");
-  assert.ok(text.includes("MethaTech"));
+  assert.ok(!text.includes("M   M"), "no ASCII banner rows on narrow terminals");
   assert.ok(text.includes("Pesan pertama memulai sesi."));
   assert.ok(text.includes("Try:"));
   for (const line of lines) {
@@ -664,7 +655,7 @@ test("welcomeLayout: paid model shows price, unknown balance shows dash", () => 
 test("welcomeLayout: top-anchored (0.1.9 §4o, Freebuff chat.tsx flex-start)", () => {
   // Tall terminal: the welcome content starts on the FIRST row of the
   // message area and the slack sits below it — never a void above the
-  // wordmark. Before the fix the block was vertically centered.
+  // info card. Before the fix the block was vertically centered.
   const w = welcomeLayout({
     available: 36,
     contentWidth: 116,
@@ -675,18 +666,18 @@ test("welcomeLayout: top-anchored (0.1.9 §4o, Freebuff chat.tsx flex-start)", (
   });
   assert.equal(w.rows.length, 36, "welcome must fill exactly the message budget");
   const lines = w.rows.map((l) => l.segments.map((s) => s.text).join(""));
-  assert.ok(lines[0].includes("M   M"), "first row is the wordmark banner, not a blank pad");
+  assert.ok(lines[0].includes("╭"), "first row is the info card top border, not a blank pad");
   assert.ok(lines[lines.length - 1].trim() === "", "slack sits below the content");
   const firstBlank = lines.findIndex((l) => l.trim() === "");
-  assert.equal(firstBlank, 5, "first blank is the banner/info-box separator inside the content, not a top pad");
-  assert.ok(lines.join("\n").includes("Pesan pertama memulai sesi."), "info box follows below the banner");
+  assert.equal(firstBlank, 10, "first blank is the slack below the content (5 card + 1 Try + 3 starters + 1 hint)");
+  assert.ok(lines.join("\n").includes("Pesan pertama memulai sesi."), "info box is the first content");
 });
 
-test("welcomeLayout: banner content fits the 80x24 message area (0.1.9 §4o)", () => {
+test("welcomeLayout: content fits the 80x24 message area (0.1.9 §4o, no banner)", () => {
   // With the 5-row centered composer the message area at 80x24 is
-  // 16 rows (24 - 1 header - 5 input - 2 footer). The banner content
-  // must be <= 16 rows so the hint row (Type /model ... /models ...)
-  // is never sliced off the bottom — that exact clip failed s13 once.
+  // 16 rows (24 - 1 header - 5 input - 2 footer). The welcome content
+  // is 10 rows (5 card + 1 Try + 3 starters + 1 hint), so the hint
+  // row (Type /model ... /models ...) is never sliced off the bottom.
   const w = welcomeLayout({
     available: 16,
     contentWidth: 76,
@@ -699,6 +690,42 @@ test("welcomeLayout: banner content fits the 80x24 message area (0.1.9 §4o)", (
   const text = w.rows.map((l) => l.segments.map((s) => s.text).join("")).join("\n");
   assert.ok(text.includes("/models"), "hint row with /models survives at 80x24");
   assert.ok(text.includes("Try:"), "starters label survives at 80x24");
+  assert.ok(!text.includes("M   M"), "no ASCII banner rows");
+});
+
+test("headerLayout: persistent conversation header is the info card alone (Freebuff chat.tsx:2243)", () => {
+  // Empty state: the card invites the first message.
+  const empty = headerLayout({
+    contentWidth: 76,
+    model: "glm-5.3-flash",
+    free: true,
+    priceText: null,
+    balanceUsd: 0.4855,
+    hasMessages: false,
+  });
+  assert.equal(empty.length, 5, "header is exactly the 5-row info box");
+  const emptyText = empty.map((l) => l.segments.map((s) => s.text).join("")).join("\n");
+  assert.ok(emptyText.includes("Pesan pertama memulai sesi."));
+  assert.ok(emptyText.includes("glm-5.3-flash"));
+  assert.ok(emptyText.includes("Balance: $0.4855"));
+  assert.ok(!emptyText.includes("M   M"), "no ASCII banner rows in the header");
+  assert.ok(!emptyText.includes("EEEEE"), "no ASCII banner rows in the header");
+  assert.ok(!emptyText.includes("Try:"), "starters are NOT part of the persistent header");
+  // Conversation running: the session line switches to active
+  // (Freebuff freebuff-chat-header.tsx conditional), the card stays.
+  const running = headerLayout({
+    contentWidth: 76,
+    model: "glm-5.3-flash",
+    free: true,
+    priceText: null,
+    balanceUsd: 0.4855,
+    hasMessages: true,
+  });
+  assert.equal(running.length, 5, "header stays 5 rows once the conversation exists");
+  const runningText = running.map((l) => l.segments.map((s) => s.text).join("")).join("\n");
+  assert.ok(runningText.includes("Sesi aktif."));
+  assert.ok(!runningText.includes("Pesan pertama memulai sesi."), "stale invite line must not linger above a running conversation");
+  assert.ok(runningText.includes("glm-5.3-flash"));
 });
 
 test("composerIsCentered: Freebuff rest height (chat.tsx:2122-2123)", () => {
@@ -726,7 +753,7 @@ test("welcomeLayout: tiny terminal degrades without breaking the budget", () => 
     });
     assert.equal(w.rows.length, avail, `rows must equal available=${avail}`);
   }
-  // Narrow-but-tall: banner does not fit, plain wordmark is used.
+  // Narrow-but-tall: the card still renders, no ASCII art anywhere.
   const narrow = welcomeLayout({
     available: 21,
     contentWidth: 44,
@@ -735,8 +762,10 @@ test("welcomeLayout: tiny terminal degrades without breaking the budget", () => 
     priceText: null,
     balanceUsd: 0.4855,
   });
-  assert.equal(narrow.banner, false);
   assert.equal(narrow.rows.length, 21);
+  const narrowText = narrow.rows.map((l) => l.segments.map((s) => s.text).join("")).join("\n");
+  assert.ok(!narrowText.includes("M   M"), "no ASCII banner rows on narrow terminals");
+  assert.ok(narrowText.includes("Pesan pertama memulai sesi."));
 });
 
 test("easeOutCubic: Freebuff's scroll easing (0 -> 0, 1 -> 1, fast start)", () => {

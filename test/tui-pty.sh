@@ -126,7 +126,11 @@ start_tui() { # start_tui <cols> <rows> [args...]
   tmux kill-session -t "$SESSION" 2>/dev/null
   tmux new-session -d -s "$SESSION" -x "$cols" -y "$rows" \
     "METATECH_CONFIG_DIR='$METATECH_CONFIG_DIR' METATECH_API_KEY='$METATECH_API_KEY' METATECH_API_BASE='http://127.0.0.1:$MOCK_PORT' METATECH_CONSOLE_BASE='http://127.0.0.1:$MOCK_PORT' node dist/cli.js $*"
-  sleep 2
+  # 3s, not 2s: on a loaded VM the TUI (node + Ink init + first API
+  # round-trip) can take >2s to first paint, and capture then reads a
+  # blank pane — s1 flaked exactly that way on the 2026-11-10 re-run
+  # (24 blank rows, 4 FAILs), while the same build paints in <=2s idle.
+  sleep 3
 }
 capture() { # capture <name>
   tmux capture-pane -t "$SESSION" -p -e > "$OUTDIR/$1.txt" 2>/dev/null
@@ -387,15 +391,16 @@ check "$OUTDIR/s13-welcome-desktop.plain.txt" "Try:" "s13: welcome suggestions l
 check "$OUTDIR/s13-welcome-desktop.plain.txt" "/models" "s13: welcome suggests /models"
 check_row "$OUTDIR/s13-welcome-desktop.plain.txt" "MethaTech" 1 "s13: header still on row 1 with welcome"
 check_last_row "$OUTDIR/s13-welcome-desktop.plain.txt" "╰" 22 "s13: input box bottom border on row 22 with welcome"
-# 0.1.9 §4o: welcome is TOP-anchored (Freebuff chat.tsx flex-start) —
-# the banner is the first content row of the message area (row 2,
+# TUI layout restore (Reza 2026-11-10: ASCII banner REMOVED entirely):
+# the welcome card is the first content row of the message area (row 2,
 # directly below the header), the empty space sits below the block.
-banner_row=$(row_of "$OUTDIR/s13-welcome-desktop.plain.txt" "M   M")
-if [ "$banner_row" = "2" ]; then
-  echo "PASS: s13: banner top-anchored (row 2)"; PASS=$((PASS+1))
+card_row=$(row_of "$OUTDIR/s13-welcome-desktop.plain.txt" "╭")
+if [ "$card_row" = "2" ]; then
+  echo "PASS: s13: welcome card top-anchored (row 2)"; PASS=$((PASS+1))
 else
-  echo "FAIL: s13: banner not top-anchored (row '${banner_row:-none}', expected 2)"; FAIL=$((FAIL+1))
+  echo "FAIL: s13: welcome card not top-anchored (row '${card_row:-none}', expected 2)"; FAIL=$((FAIL+1))
 fi
+check_absent "$OUTDIR/s13-welcome-desktop.plain.txt" "M   M" "s13: no ASCII banner rows on the welcome screen"
 stop_tui
 start_tui 40 15
 capture s13-welcome-small
@@ -404,16 +409,32 @@ check "$OUTDIR/s13-welcome-small.plain.txt" "Try:" "s13: welcome suggestions sho
 check_last_row "$OUTDIR/s13-welcome-small.plain.txt" "╰" 13 "s13: input box bottom border on row 13 with welcome at 40x15"
 stop_tui
 
-# --- Scenario 14: welcome disappears after the first message ---
+# --- Scenario 14: welcome card PERSISTS as the conversation header ---
+# TUI layout restore (Freebuff chat.tsx:2243-2275 — the header is a
+# permanent first child of the scrollbox): after the first message the
+# info card stays above the conversation (its session line switches
+# to "Sesi aktif."), only the starters vanish. Before the fix the
+# whole welcome block disappeared and the first message jumped to the
+# very top of an empty viewport.
 restart_mock
 start_tui 80 24
 send "halo"
 send Enter
 sleep 1
-capture s14-welcome-gone
-check_absent "$OUTDIR/s14-welcome-gone.plain.txt" "Pesan pertama memulai sesi" "s14: welcome info gone after first message"
-check_absent "$OUTDIR/s14-welcome-gone.plain.txt" "Try:" "s14: welcome suggestions gone after first message"
-check "$OUTDIR/s14-welcome-gone.plain.txt" "Halo! Ini balasan mock." "s14: reply renders after welcome leaves"
+capture s14-header-persists
+check "$OUTDIR/s14-header-persists.plain.txt" "Sesi aktif" "s14: header card persists with active session line after first message"
+check_absent "$OUTDIR/s14-header-persists.plain.txt" "Pesan pertama memulai sesi" "s14: stale invite line gone once the conversation exists"
+check_absent "$OUTDIR/s14-header-persists.plain.txt" "Try:" "s14: welcome suggestions gone after first message"
+check_absent "$OUTDIR/s14-header-persists.plain.txt" "M   M" "s14: no ASCII banner rows after first message"
+check "$OUTDIR/s14-header-persists.plain.txt" "Halo! Ini balasan mock." "s14: reply renders below the persistent header"
+# The card is the first content (rows 2-6), so the first message's
+# timestamp lands on row 7 and "You:" on row 8 — not row 2/3.
+ts14=$(grep -n -m1 -E "^ +\\[[0-9]{2}:[0-9]{2}\\]" "$OUTDIR/s14-header-persists.plain.txt" | cut -d: -f1)
+if [ "$ts14" = "7" ]; then
+  echo "PASS: s14: first timestamp on row 7 (below the 5-row header card)"; PASS=$((PASS+1))
+else
+  echo "FAIL: s14: first timestamp on row '${ts14:-none}' (expected 7)"; FAIL=$((FAIL+1))
+fi
 stop_tui
 
 # --- Scenario 15: history — Up recalls the last sent message into the draft ---
@@ -763,7 +784,6 @@ send PageUp
 capture s27-markdown-80-top
 check "$OUTDIR/s27-markdown-80-top.plain.txt" "Panduan Lengkap" "s27/80: H1 renders"
 check "$OUTDIR/s27-markdown-80-top.plain.txt" "teks tebal" "s27/80: bold text renders"
-check "$OUTDIR/s27-markdown-80-top.plain.txt" "1. pertama" "s27/80: numbered list renders"
 check_absent "$OUTDIR/s27-markdown-80-top.plain.txt" "**teks tebal**" "s27/80: no raw **bold** markers"
 check_absent "$OUTDIR/s27-markdown-80-top.plain.txt" "~~teks dicoret~~" "s27/80: no raw ~~strike~~ markers"
 # 0.1.9 §4o: the blockquote sits on flat line 17, but the message area
@@ -775,6 +795,12 @@ check_absent "$OUTDIR/s27-markdown-80-top.plain.txt" "~~teks dicoret~~" "s27/80:
 send PageDown
 capture s27-markdown-80-mid
 check "$OUTDIR/s27-markdown-80-mid.plain.txt" "> Kutipan penting" "s27/80: blockquote renders (one page down from the top)"
+# TUI restore 2026-11-10: the numbered list sits 5 rows lower than
+# before, because the persistent conversation header (5 rows) now
+# occupies the top of the scrollable lines — Freebuff's header-inside-
+# scrollbox. The renderer is unchanged; the list renders one page
+# down, in this same mid capture.
+check "$OUTDIR/s27-markdown-80-mid.plain.txt" "1. pertama" "s27/80: numbered list renders (one page down from the top)"
 stop_tui
 start_tui 40 15
 send "tampilkan panduan"
@@ -1134,27 +1160,27 @@ capture s33-welcome-80
 check_last_row "$OUTDIR/s33-welcome-80.plain.txt" "╭" 18 "s33/80: input top border on row 18 (5-row composer at rest)"
 check_last_row "$OUTDIR/s33-welcome-80.plain.txt" "╰" 22 "s33/80: input bottom border on row 22"
 check_row "$OUTDIR/s33-welcome-80.plain.txt" "Enter a coding task" 20 "s33/80: placeholder on the centered middle row 20"
-banner33=$(row_of "$OUTDIR/s33-welcome-80.plain.txt" "M   M")
-if [ "$banner33" = "2" ]; then
-  echo "PASS: s33/80: welcome banner top-anchored (row 2, no void above)"; PASS=$((PASS+1))
+card33=$(row_of "$OUTDIR/s33-welcome-80.plain.txt" "╭")
+if [ "$card33" = "2" ]; then
+  echo "PASS: s33/80: welcome card top-anchored (row 2, no void above)"; PASS=$((PASS+1))
 else
-  echo "FAIL: s33/80: welcome banner not top-anchored (row '${banner33:-none}', expected 2)"; FAIL=$((FAIL+1))
+  echo "FAIL: s33/80: welcome card not top-anchored (row '${card33:-none}', expected 2)"; FAIL=$((FAIL+1))
 fi
 send "halo"
 send Enter
 sleep 1
 capture s33-chat-80
 ts33=$(grep -n -m1 -E "^ +\\[[0-9]{2}:[0-9]{2}\\]" "$OUTDIR/s33-chat-80.plain.txt" | cut -d: -f1)
-if [ "$ts33" = "2" ]; then
-  echo "PASS: s33/80: first message starts on row 2 (top-anchored, no void above)"; PASS=$((PASS+1))
+if [ "$ts33" = "7" ]; then
+  echo "PASS: s33/80: first message starts on row 7 (below the 5-row persistent header card)"; PASS=$((PASS+1))
 else
-  echo "FAIL: s33/80: first message on row '${ts33:-none}' (expected 2)"; FAIL=$((FAIL+1))
+  echo "FAIL: s33/80: first message on row '${ts33:-none}' (expected 7)"; FAIL=$((FAIL+1))
 fi
 you33=$(row_of "$OUTDIR/s33-chat-80.plain.txt" "You: halo")
-if [ "$you33" = "3" ]; then
-  echo "PASS: s33/80: You: on row 3 (timestamp directly above, §4p — no blank gap row)"; PASS=$((PASS+1))
+if [ "$you33" = "8" ]; then
+  echo "PASS: s33/80: You: on row 8 (timestamp directly above, §4p — no blank gap row)"; PASS=$((PASS+1))
 else
-  echo "FAIL: s33/80: You: on row '${you33:-none}' (expected 3)"; FAIL=$((FAIL+1))
+  echo "FAIL: s33/80: You: on row '${you33:-none}' (expected 8)"; FAIL=$((FAIL+1))
 fi
 check_last_row "$OUTDIR/s33-chat-80.plain.txt" "╰" 22 "s33/80: input bottom border stays on row 22 after a message"
 check_last_row "$OUTDIR/s33-chat-80.plain.txt" "╭" 18 "s33/80: composer stays 5 rows after a message"
@@ -1183,7 +1209,7 @@ check_last_row "$OUTDIR/s33-welcome-40.plain.txt" "╰" 13 "s33/40: input bottom
 check_last_row "$OUTDIR/s33-welcome-40.plain.txt" "╭" 10 "s33/40: input top border on row 10 (4-row box, placeholder wraps to 2)"
 check_row "$OUTDIR/s33-welcome-40.plain.txt" "Enter a coding task" 11 "s33/40: placeholder first row on row 11"
 stop_tui
-# Tall desktop terminal: frame fills 120x40, banner top-anchored,
+# Tall desktop terminal: frame fills 120x40, card top-anchored,
 # composer still 5 rows at rest, footer on the last row.
 start_tui 120 40
 capture s33-welcome-120
@@ -1191,11 +1217,11 @@ check_last_row "$OUTDIR/s33-welcome-120.plain.txt" "╰" 38 "s33/120: input bott
 check_last_row "$OUTDIR/s33-welcome-120.plain.txt" "╭" 34 "s33/120: input top border on row 34 (5-row composer)"
 check_row "$OUTDIR/s33-welcome-120.plain.txt" "Enter a coding task" 36 "s33/120: placeholder on the centered row 36"
 check_row "$OUTDIR/s33-welcome-120.plain.txt" "Ctrl+C 2x keluar" 40 "s33/120: footer on the last row 40"
-banner33b=$(row_of "$OUTDIR/s33-welcome-120.plain.txt" "M   M")
-if [ "$banner33b" = "2" ]; then
-  echo "PASS: s33/120: welcome banner top-anchored (row 2) at 120x40"; PASS=$((PASS+1))
+card33b=$(row_of "$OUTDIR/s33-welcome-120.plain.txt" "╭")
+if [ "$card33b" = "2" ]; then
+  echo "PASS: s33/120: welcome card top-anchored (row 2) at 120x40"; PASS=$((PASS+1))
 else
-  echo "FAIL: s33/120: welcome banner not top-anchored (row '${banner33b:-none}', expected 2)"; FAIL=$((FAIL+1))
+  echo "FAIL: s33/120: welcome card not top-anchored (row '${card33b:-none}', expected 2)"; FAIL=$((FAIL+1))
 fi
 stop_tui
 
@@ -1259,23 +1285,23 @@ reset_credentials
 # and edits hello.txt, then runs the shell command there. Created
 # here, removed at the end of this scenario — never committed.
 printf 'isi hello untuk agen\n' > hello.txt
-# 56 rows: the completed 6-step turn is 52 rows tall (header + user
-# + 11 blocks with Freebuff gap-1 + status/input/footer), so 50 rows
-# would scroll the user message off the top once the final
-# task_completed block lands — the turn must fit whole for the
-# no-position-shift checks below to mean anything.
-start_tui 80 56
+# 68 rows: the completed 6-step turn is 57 rows tall (persistent
+# 5-row header card + user + 11 blocks with Freebuff gap-1 +
+# status/input/footer), so 56 rows would scroll the user message off
+# the top once the final task_completed block lands — the turn must
+# fit whole for the no-position-shift checks below to mean anything.
+start_tui 80 68
 send "baca hello.txt dan jalankan echo"
 send Enter
 sleep 3
 capture s35-mid-80
-check_row "$OUTDIR/s35-mid-80.plain.txt" "You: baca hello.txt" 3 "s35/80: user message stays on row 3 mid-stream (streaming does not move messages)"
+check_row "$OUTDIR/s35-mid-80.plain.txt" "You: baca hello.txt" 8 "s35/80: user message stays on row 8 mid-stream (streaming does not move messages)"
 check "$OUTDIR/s35-mid-80.plain.txt" "■ Esc" "s35/80: status row with Esc visible while streaming"
-check_last_row "$OUTDIR/s35-mid-80.plain.txt" "╰" 54 "s35/80: input bottom border stays on row 54 mid-stream (input stays in the input area)"
+check_last_row "$OUTDIR/s35-mid-80.plain.txt" "╰" 66 "s35/80: input bottom border stays on row 66 mid-stream (input stays in the input area)"
 sleep 10
 capture s35-done-80
-check_row "$OUTDIR/s35-done-80.plain.txt" "You: baca hello.txt" 3 "s35/80: user message still on row 3 after the turn (no position shift)"
-check_last_row "$OUTDIR/s35-done-80.plain.txt" "╰" 54 "s35/80: input bottom border stays on row 54 after the turn"
+check_row "$OUTDIR/s35-done-80.plain.txt" "You: baca hello.txt" 8 "s35/80: user message still on row 8 after the turn (no position shift)"
+check_last_row "$OUTDIR/s35-done-80.plain.txt" "╰" 66 "s35/80: input bottom border stays on row 66 after the turn"
 check_absent "$OUTDIR/s35-done-80.plain.txt" "working..." "s35/80: status row gone after the turn (status never enters the transcript)"
 check_order() { # check_order <file> <earlier> <later> <label>
   local a b

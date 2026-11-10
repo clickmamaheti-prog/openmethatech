@@ -79,6 +79,7 @@ import {
   flattenMessages,
   composerIsCentered,
   COMPOSER_CENTERED_CONTENT_ROWS,
+  headerLayout,
   inputBoxRowsFor,
   layoutBudget,
   pageScrollOffset,
@@ -584,10 +585,14 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
   //
   // Welcome / empty state: while there are no messages (and no
   // picker/palette open) the message area shows the welcome block
-  // instead of an empty black hole — block wordmark, info box, and
-  // suggestions, vertically centered in the area. It is exactly
+  // instead of an empty black hole — info card, suggestions,
+  // vertically centered in the area. It is exactly
   // `messageAvailable` rows, so the budget math below stays exact.
-  // The first sent message makes it disappear for good (until /clear).
+  // The first sent message makes the STARTERS disappear for good
+  // (until /clear); the info card itself PERSISTS as the
+  // conversation header (Freebuff chat.tsx:2243-2275 — the header is
+  // a permanent first child of the scrollbox), prepended to the
+  // message lines below.
   const showWelcome = messages.length === 0 && !pickerOpen && !paletteOpen;
   const welcome = showWelcome
     ? welcomeLayout({
@@ -611,7 +616,26 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
   // scrollOffset, wheel, PgUp/PgDn, auto-scroll, easeOutCubic,
   // and the footer scroll affordances all work exactly as before;
   // only the visible track/thumb is removed.
-  const flatLines = flattenMessages(messages, messageWidth, { thinkingExpanded });
+  // Persistent conversation header (Freebuff chat.tsx:2243-2275 —
+  // the header is a PERMANENT first child of the scrollbox, not an
+  // empty-state-only branch): the welcome card stays above the
+  // messages once the conversation starts, and only scrolls away
+  // naturally once the history overflows the viewport. In the empty
+  // state the welcome block already contains the same card, so the
+  // header is prepended only when messages exist — never twice.
+  // The header is render-only lines: /export and /compact read the
+  // message list, never these rows.
+  const header = headerLayout({
+    contentWidth,
+    model,
+    free,
+    priceText,
+    balanceUsd,
+    hasMessages: messages.length > 0,
+  });
+  const flatLines = showWelcome
+    ? []
+    : [...header, ...flattenMessages(messages, messageWidth, { thinkingExpanded })];
   let linesBudget = messageAvailable;
   let windowed = windowLines(flatLines, linesBudget, scrollOffset);
   // The "↑ N baris di atas" row only shows while the user is actually
