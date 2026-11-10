@@ -1110,8 +1110,9 @@ export function headerLayout(opts: HeaderOptions): VisualLine[] {
 /**
  * Build the welcome / empty state: the info box (headerLayout, no
  * messages yet) + the "Try:" starter prompts + the short /model +
- * /models hint, top-anchored. The content is sliced if the terminal
- * is shorter than the compact form.
+ * /models hint, bottom-anchored (Reza's order 2026-11-10): the block
+ * sits right above the composer, empty space above it. The content
+ * is sliced if the terminal is shorter than the compact form.
  */
 export function welcomeLayout(opts: WelcomeOptions): WelcomeLayout {
   const { available, contentWidth, model, free, priceText, balanceUsd } = opts;
@@ -1166,14 +1167,17 @@ export function welcomeLayout(opts: WelcomeOptions): WelcomeLayout {
       : []),
   ];
   const slack = avail - content.length;
-  // Freebuff top-anchors the welcome header: it is the FIRST child of
-  // the scrollbox (chat.tsx:2243 <scrollbox ...> — Header above the
-  // messages, justifyContent flex-start), so the empty space sits BELOW
-  // the welcome block, inside the conversation viewport, never above it.
-  // 0.1.9 §4o: topPad was ceil(slack/2) (vertically centered welcome —
+  // Bottom-anchored on Reza's explicit order 2026-11-10 (same
+  // flex-end placement as the conversation, Freebuff chat.tsx:2273):
+  // all slack sits ABOVE the welcome block, so the card + Try +
+  // starters sit right above the composer and the card does NOT jump
+  // from the top of the screen to the bottom when the first message
+  // arrives — it stays in place and only the starters disappear.
+  // Reversal of 0.1.9 §4o (topPad 0, empty space below the block)
+  // and of the even older centered welcome (topPad ceil(slack/2),
   // the void split above AND below the wordmark at tall terminals).
-  const topPad = 0;
-  const bottomPad = Math.max(0, slack - topPad);
+  const topPad = Math.max(0, slack);
+  const bottomPad = 0;
   const rows: VisualLine[] = [
     ...Array.from({ length: topPad }, () => blankLine()),
     ...content.slice(0, avail - topPad),

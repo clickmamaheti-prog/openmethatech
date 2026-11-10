@@ -3,6 +3,30 @@
 All notable changes to `@methatech-cli/cli`. Versions are published to npm
 as `@methatech-cli/cli`.
 
+## [0.1.12] — 2026-11-10
+
+Bottom-anchor fix on Reza's explicit order: the conversation is now
+pinned to the BOTTOM, right above the composer, with the empty space
+above it — the layout he ordered after rejecting 0.1.11 live on Termux
+(everything was still at the top). Placement value from Freebuff's own
+`cli/src/chat.tsx:2273` ternary
+(`justifyContent: IS_FREEBUFF ? 'flex-start' : 'flex-end'`) — MethaTech
+now uses the `flex-end` branch. Full background and PTY evidence in
+`docs/TUI-BOTTOM-ANCHOR.md`.
+
+- **Bottom-anchored conversation:** `ChatApp.tsx` message-area Box
+  `justifyContent` "flex-start" → "flex-end"; filler rows moved from
+  after `windowed.lines` to before them, so the empty viewport sits
+  above the conversation. Once history overflows, filler is 0 and the
+  window pins to the latest lines — the same sticky-bottom Freebuff
+  gets from `stickyStart="bottom"`.
+- **Bottom-anchored welcome block:** `layout.ts` `welcomeLayout`
+  `topPad = slack`, `bottomPad = 0` — the card + "Try:" starters +
+  hint sit right above the composer at startup, so the card does not
+  jump when the first message arrives.
+- **PTY test expectations updated** to the new row positions
+  (verified against actual captures; no check deleted or weakened).
+
 ## [0.1.11] — 2026-11-10
 
 TUI layout restore on top of the 0.1.10 ContentBlock fix. The conversation

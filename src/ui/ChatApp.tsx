@@ -1839,25 +1839,36 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
       </Box>
 
       {/* Message area: flexGrow takes every row the fixed blocks leave.
-          Freebuff chat.tsx contentOptions: justifyContent flex-start
-          for the Freebuff brand — the conversation is TOP-anchored, the
-          empty space sits below the last message inside the viewport,
-          never above it. 0.1.9 §4o: flex-end pinned short histories
-          right above the input and left a black void ABOVE the
-          conversation (up to 20 rows at 120x40) — that was the "celah
-          kosong". Filler rows still paint the empty viewport black, now
-          after the windowed lines, so the frame stays exactly `rows`
-          tall; the window shows only the last budgeted visual lines. */}
+          Bottom-anchored on Reza's explicit order 2026-11-10 ("pesan
+          menempel di bawah, tepat di atas composer, ruang kosong di
+          atas"): the conversation is pinned right above the composer
+          and the empty space sits ABOVE the last message inside the
+          viewport, never below it. Placement value from Freebuff's own
+          chat.tsx contentOptions ternary (cli/src/chat.tsx:2273):
+          `justifyContent: IS_FREEBUFF ? 'flex-start' : 'flex-end'` —
+          MethaTech uses the flex-end placement (the other branch of
+          the same Freebuff line). Reversal of 0.1.9 §4o, which chose
+          flex-start because flex-end "left a black void ABOVE the
+          conversation" — that void above is exactly what Reza wants.
+          Filler rows paint the empty viewport black and now sit BEFORE
+          the windowed lines, so the frame stays exactly `rows` tall.
+          Filler only exists while the content is shorter than the
+          budget (short conversation, necessarily at the bottom); once
+          the history overflows, filler is 0 and the window pins to
+          the latest lines — the same sticky-bottom Freebuff gets from
+          stickyStart="bottom" (chat.tsx:2244). The scrolled-up layout
+          is unchanged: the indicator stays first, filler is 0 then. */}
       <Box
         flexDirection="column"
         flexGrow={1}
-        justifyContent="flex-start"
+        justifyContent="flex-end"
         backgroundColor={theme.background}
       >
         {showWelcome && welcome ? (
           // Welcome / empty state: exactly `messageAvailable` rows,
-          // top-anchored content (layout.ts, Freebuff chat.tsx: the
-          // header is the first child of the scrollbox). No filler needed.
+          // bottom-anchored content (layout.ts): the card + Try +
+          // starters sit right above the composer, empty space above.
+          // No filler needed.
           welcome.rows.map((line, i) => (
             <Text key={`w-${i}`}>
               {line.segments.map((seg, j) => (
@@ -1882,6 +1893,17 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
                 {`↑ ${windowed.hiddenAbove} baris di atas · PgUp/PgDn riwayat`}
               </Text>
             )}
+            {/* Filler BEFORE the lines (Reza's order 2026-11-10,
+                Freebuff chat.tsx:2273 flex-end placement): the empty
+                viewport sits above the conversation, the messages are
+                pinned right above the composer. Count unchanged — the
+                frame stays exactly `rows` tall. Filler is 0 whenever
+                the content overflows, so long histories are unaffected. */}
+            {Array.from({ length: fillerRows }, (_, i) => (
+              <Text key={`f-${i}`} backgroundColor={theme.background}>
+                {fillerLine}
+              </Text>
+            ))}
             {windowed.lines.map((line, i) => (
               <Text key={i}>
                 {line.segments.map((seg, j) => (
@@ -1897,15 +1919,6 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
                     {seg.text}
                   </Text>
                 ))}
-              </Text>
-            ))}
-            {/* Filler AFTER the lines (0.1.9 §4o, Freebuff flex-start):
-                the empty viewport sits below the conversation, never
-                above it. Count unchanged — the frame stays exactly
-                `rows` tall. */}
-            {Array.from({ length: fillerRows }, (_, i) => (
-              <Text key={`f-${i}`} backgroundColor={theme.background}>
-                {fillerLine}
               </Text>
             ))}
           </>

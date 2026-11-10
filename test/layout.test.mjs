@@ -652,10 +652,10 @@ test("welcomeLayout: paid model shows price, unknown balance shows dash", () => 
   assert.ok(!text.includes("FREE $0.00"));
 });
 
-test("welcomeLayout: top-anchored (0.1.9 §4o, Freebuff chat.tsx flex-start)", () => {
-  // Tall terminal: the welcome content starts on the FIRST row of the
-  // message area and the slack sits below it — never a void above the
-  // info card. Before the fix the block was vertically centered.
+test("welcomeLayout: bottom-anchored (Reza's order 2026-11-10, Freebuff chat.tsx:2273 flex-end)", () => {
+  // Tall terminal: the slack sits ABOVE the welcome content and the
+  // block is pinned right above the composer — never a void below the
+  // hint row. Reversal of 0.1.9 §4o (top-anchored, slack below).
   const w = welcomeLayout({
     available: 36,
     contentWidth: 116,
@@ -666,10 +666,9 @@ test("welcomeLayout: top-anchored (0.1.9 §4o, Freebuff chat.tsx flex-start)", (
   });
   assert.equal(w.rows.length, 36, "welcome must fill exactly the message budget");
   const lines = w.rows.map((l) => l.segments.map((s) => s.text).join(""));
-  assert.ok(lines[0].includes("╭"), "first row is the info card top border, not a blank pad");
-  assert.ok(lines[lines.length - 1].trim() === "", "slack sits below the content");
-  const firstBlank = lines.findIndex((l) => l.trim() === "");
-  assert.equal(firstBlank, 10, "first blank is the slack below the content (5 card + 1 Try + 3 starters + 1 hint)");
+  assert.ok(lines[0].trim() === "", "first row is blank slack above the content");
+  assert.equal(lines.findIndex((l) => l.includes("╭")), 26, "info card top border sits at row 26 (36 - 10 content rows)");
+  assert.ok(lines[lines.length - 1].includes("/models"), "last row is the hint row, pinned above the composer");
   assert.ok(lines.join("\n").includes("Pesan pertama memulai sesi."), "info box is the first content");
 });
 
