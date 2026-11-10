@@ -45,6 +45,8 @@ import {
   generateInitSummary,
   compactPrompt,
   exportConversation,
+  selectExportMessages,
+  selectConversationMessages,
   collectChatText,
   createDefaultAdapter,
   collectSessionSecrets,
@@ -89,6 +91,7 @@ import {
   windowLines,
   wrapLineCount,
   STARTER_PROMPTS,
+  type AssistantBlock,
 } from "./layout.js";
 import { filterCommands, paletteClampIndex, paletteNextIndex, palettePrevIndex } from "./palette.js";
 import { flattenGroups, groupCatalog, isLocked, lockedExplanation, pickerNext, pickerPrev } from "./picker.js";
@@ -117,24 +120,28 @@ import ModelPicker from "./ModelPicker.js";
 import CodeBlock from "./CodeBlock.js";
 
 type DisplayMessage = ChatMessage & {
-  kind: "chat" | "system" | "tool" | "todos";
+  kind: "chat" | "system";
   ts: number;
+  /**
+   * True only for the /compact summary message. It stays
+   * `kind: "system"` for rendering, but /export includes it (via
+   * selectExportMessages) so the pre-compact context is not lost;
+   * ordinary system notices have no flag and stay out of exports.
+   */
+  isSummary?: boolean;
   thinking?: string;
   thinkingComplete?: boolean;
-  /** To-do list for kind "todos" (Freebuff shape: {task, completed}). */
-  todos?: { task: string; completed: boolean }[];
   /**
-   * Structured tool call for kind "tool" (Freebuff ToolCallItem +
-   * TerminalCommandDisplay). The layout renders the preview BOLD
-   * and each result ✓ in success green / ✗ in error red; `content`
-   * keeps the plain-text rendering for any other consumer.
+   * Ordered blocks of one assistant turn (Freebuff ChatMessage.blocks
+   * / ContentBlock). Tool calls and to-dos are BLOCKS inside the
+   * turn's assistant message — never separate top-level messages —
+   * so a turn renders in true arrival order: text, tool, text, tool.
+   * `content` keeps the CONCATENATED assistant text of the turn
+   * (for /export and /compact, which read message content); the
+   * layout renders `blocks` when present and falls back to `content`
+   * for messages without blocks.
    */
-  tool?: {
-    name: string;
-    preview: string;
-    shell: boolean;
-    results: { ok: boolean; text: string }[];
-  };
+  blocks?: AssistantBlock[];
   /**
    * Attachments sent with this user message (compact metadata only —
    * the full content lives in the agent history). The layout renders
@@ -721,65 +728,131 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
   };
 
   // ---- Agent helpers ----
+  /**
+   * Append a tool call as a BLOCK inside the current turn's assistant
+   * message (Freebuff ContentBlock tool, blocks-renderer.tsx) — never
+   * a separate top-level message. Before this change, tool calls were
+   * their own messages appended AFTER the assistant message, so all
+   * assistant text of the turn rendered ABOVE all tool calls no
+   * matter when it actually arrived.
+   */
   const pushTool = (preview: string, toolName: string) => {
     const clean = sanitizeTerminalText(preview);
-    setMessages((m) => [
-      ...m,
-      {
-        role: "assistant",
-        content: clean,
-        kind: "tool",
-        ts: Date.now(),
-        tool: { name: toolName, preview: clean, shell: clean.startsWith("$ "), results: [] },
-      },
-    ]);
-  };
-  /**
-   * Append a result line to the last tool message (the to-do list is
-   * its own kind now, so it is never a target). The structured
-   * result keeps the real status (✓ green / ✗ red in the layout);
-   * `content` keeps the plain-text rendering for any other consumer.
-   */
-  const appendToLastTool = (summary: string, ok: boolean) => {
-    // The summary is tool output / file content (external text):
-    // strip escapes and collapse progress-bar redraws before it
-    // reaches the layout. The layout adds its own ✓/✗ marker, so
-    // the stored text is the plain summary, not the decorated line.
-    const clean = sanitizeTerminalOutput(summary);
     setMessages((m) => {
       const copy = [...m];
       for (let i = copy.length - 1; i >= 0; i--) {
         const msg = copy[i];
-        if (msg && msg.kind === "tool") {
-          const tool = msg.tool
-            ? { ...msg.tool, results: [...msg.tool.results, { ok, text: clean }] }
-            : undefined;
-          copy[i] = { ...msg, content: `${msg.content}\n  ${ok ? "✓" : "✗"} ${clean}`, tool };
+        if (msg && msg.role === "assistant" && msg.kind === "chat") {
+          const block: AssistantBlock = {
+            type: "tool",
+            name: toolName,
+            preview: clean,
+            shell: clean.startsWith("$ "),
+            results: [],
+            done: false,
+          };
+          copy[i] = { ...msg, blocks: [...(msg.blocks ?? []), block] };
           return copy;
         }
       }
       return copy;
     });
   };
-  /** Replace the to-do list message, or push it when there is none yet.
-      Freebuff write-todos.tsx: an empty list renders nothing, so an
-      empty update removes the message. */
+  /**
+   * Attach a result to its tool block. Results arrive in call order
+   * (the orchestrator guarantees it), so the target is the earliest
+   * block of this tool whose result has not arrived yet (`done` is
+   * false) — even when a parallel wave pushed several tool blocks
+   * before any result landed (all onCallStart fire before all
+   * onCallResult, so "the last tool message" used to get every
+   * result of the wave). A null summary still marks the block done:
+   * a successful read_files shows no result line (§4m), but the
+   * block must not stay "unresolved" or a later result for the same
+   * tool would attach to it. Falls back to the earliest unresolved
+   * block of any tool when the name does not match (defensive only).
+   *
+   * When NO block matches, the call never got a tool_call event —
+   * the orchestrator rejected it before announcing it (mode-rejected
+   * or unknown tool: onCallStart only fires after the mode check).
+   * Dropping that result silently would hide the rejection, so it is
+   * surfaced as a system line instead (Freebuff uses system messages
+   * for out-of-band notices). Before the block model, the same
+   * rejection was glued onto whatever tool message happened to be
+   * last — visible, but attached to the wrong tool.
+   */
+  const appendToolResult = (toolName: string, summary: string | null, ok: boolean) => {
+    // The summary is tool output / file content (external text):
+    // strip escapes and collapse progress-bar redraws before it
+    // reaches the layout. The layout adds its own ✓/✗ marker, so
+    // the stored text is the plain summary, not the decorated line.
+    const clean = summary === null ? null : sanitizeTerminalOutput(summary);
+    setMessages((m) => {
+      const copy = [...m];
+      for (let i = copy.length - 1; i >= 0; i--) {
+        const msg = copy[i];
+        if (msg && msg.role === "assistant" && msg.kind === "chat" && msg.blocks) {
+          const blocks = [...msg.blocks];
+          let bi = blocks.findIndex((b) => b.type === "tool" && b.name === toolName && !b.done);
+          if (bi < 0) bi = blocks.findIndex((b) => b.type === "tool" && !b.done);
+          if (bi < 0) continue;
+          const tool = blocks[bi];
+          if (tool.type !== "tool") continue;
+          blocks[bi] = {
+            ...tool,
+            done: true,
+            results: clean === null ? tool.results : [...tool.results, { ok, text: clean }],
+          };
+          copy[i] = { ...msg, blocks };
+          return copy;
+        }
+      }
+      // No block for this result: surface the rejection instead of
+      // dropping it (see above). A null summary has nothing to show.
+      if (clean === null) return copy;
+      return [...copy, { role: "assistant", content: clean, kind: "system", ts: Date.now() }];
+    });
+  };
+  /**
+   * Replace the to-do list BLOCK inside the current turn's assistant
+   * message, or append it when the turn has none yet. Freebuff
+   * write-todos.tsx: an empty list renders nothing, so an empty
+   * update removes the block. The block stays at the position where
+   * it first appeared inside the turn (its content is replaced, its
+   * place is not) — the old top-level message was replaced in place
+   * too, but at a position that could end up ABOVE text and tools
+   * that arrived after it.
+   */
   const upsertTodosMessage = (todos: { task: string; completed: boolean }[]) => {
     setMessages((m) => {
       const copy = [...m];
-      const idx = copy.findIndex((msg) => msg && msg.kind === "todos");
-      if (todos.length === 0) {
-        return idx >= 0 ? copy.filter((_, i) => i !== idx) : copy;
+      for (let i = copy.length - 1; i >= 0; i--) {
+        const msg = copy[i];
+        if (msg && msg.role === "assistant" && msg.kind === "chat") {
+          const blocks = [...(msg.blocks ?? [])];
+          const bi = blocks.findIndex((b) => b.type === "todos");
+          if (todos.length === 0) {
+            if (bi >= 0) blocks.splice(bi, 1);
+          } else if (bi >= 0) {
+            blocks[bi] = { type: "todos", todos };
+          } else {
+            blocks.push({ type: "todos", todos });
+          }
+          copy[i] = { ...msg, blocks };
+          return copy;
+        }
       }
-      const next = { role: "assistant" as const, content: "", kind: "todos" as const, ts: Date.now(), todos };
-      if (idx >= 0) {
-        copy[idx] = next;
-        return copy;
-      }
-      return [...m, next];
+      return copy;
     });
   };
-  /** Append streamed agent text to the last assistant chat message. */
+  /**
+   * Append streamed agent text to the last TEXT block of the current
+   * turn's assistant message — or start a new text block when the
+   * last block is a tool/todos block (Freebuff: text deltas extend
+   * the root text stream; a tool call in between starts a new text
+   * segment after it). `content` keeps the concatenated text of the
+   * whole turn (for /export and /compact); the layout renders the
+   * blocks, so the text lands BELOW any tool that ran before it.
+   */
   const appendAssistantText = (delta: string) => {
     // Stored raw on purpose: an escape sequence split across two
     // stream chunks would be corrupted by per-delta sanitizing
@@ -793,7 +866,14 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
       for (let i = copy.length - 1; i >= 0; i--) {
         const msg = copy[i];
         if (msg && msg.role === "assistant" && msg.kind === "chat") {
-          copy[i] = { ...msg, content: msg.content + delta };
+          const blocks = [...(msg.blocks ?? [])];
+          const last = blocks[blocks.length - 1];
+          if (last && last.type === "text") {
+            blocks[blocks.length - 1] = { ...last, content: last.content + delta };
+          } else {
+            blocks.push({ type: "text", content: delta });
+          }
+          copy[i] = { ...msg, content: msg.content + delta, blocks };
           return copy;
         }
       }
@@ -899,7 +979,7 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
     // attachments in prepareUserMessage) — a later message starts
     // with no cards, and a re-send never duplicates the content.
     setAttachmentsBoth([]);
-    setMessages((m) => [...m, { role: "assistant", content: "", kind: "chat", ts: now, thinking: "" }]);
+    setMessages((m) => [...m, { role: "assistant", content: "", kind: "chat", ts: now, thinking: "", blocks: [] }]);
     const abort = new AbortController();
     abortRef.current = abort;
     try {
@@ -946,9 +1026,11 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
             // still goes to the model in the loop's role "tool"
             // history message. A null summary means no result line —
             // the preview already says everything (read_files shows
-            // only its paths, never file contents).
+            // only its paths, never file contents) — but the call
+            // still counts as resolved for its block (appendToolResult
+            // marks done even for a null summary).
             const summary = summarizeToolResult(e.toolName, e.output, e.ok);
-            if (summary !== null) appendToLastTool(summary, e.ok);
+            appendToolResult(e.toolName, summary, e.ok);
           } else if (e.type === "todos") {
             agentTodosRef.current = e.todos;
             setAgentTodos(e.todos);
@@ -1006,7 +1088,11 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
           for (let i = copy.length - 1; i >= 0; i--) {
             const msg = copy[i];
             if (msg && msg.role === "assistant" && msg.kind === "chat") {
-              if (msg.content === "") copy.splice(i, 1);
+              // Empty means no text AND no blocks: a turn that only
+              // ran tools still has its tool blocks to show, so it
+              // is never spliced away (the old content-only check
+              // would have deleted the tools with the message).
+              if (msg.content === "" && (msg.blocks ?? []).length === 0) copy.splice(i, 1);
               else copy[i] = { ...msg, thinkingComplete: true };
               break;
             }
@@ -1023,7 +1109,7 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
           const copy = [...m];
           for (let i = copy.length - 1; i >= 0; i--) {
             const msg = copy[i];
-            if (msg && msg.role === "assistant" && msg.kind === "chat" && msg.content === "") {
+            if (msg && msg.role === "assistant" && msg.kind === "chat" && msg.content === "" && (msg.blocks ?? []).length === 0) {
               copy.splice(i, 1);
               break;
             }
@@ -1041,7 +1127,26 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
       setMessages((m) =>
         m.map((msg) =>
           msg.role === "assistant"
-            ? { ...msg, content: redact(msg.content), thinking: msg.thinking ? redact(msg.thinking) : msg.thinking }
+            ? {
+                ...msg,
+                content: redact(msg.content),
+                thinking: msg.thinking ? redact(msg.thinking) : msg.thinking,
+                // Text deltas are stored raw inside blocks too, so
+                // the same whole-message pass redacts them (plus tool
+                // previews/results and to-do tasks, which may echo
+                // file contents or command output).
+                blocks: msg.blocks?.map((b) =>
+                  b.type === "text"
+                    ? { ...b, content: redact(b.content) }
+                    : b.type === "tool"
+                      ? {
+                          ...b,
+                          preview: redact(b.preview),
+                          results: b.results.map((r) => ({ ...r, text: redact(r.text) })),
+                        }
+                      : { ...b, todos: b.todos.map((t) => ({ ...t, task: redact(t.task) })) },
+                ),
+              }
             : msg,
         ),
       );
@@ -1056,9 +1161,13 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
   /** /compact: summarise the conversation through the model, then
       replace the history with the summary (Freebuff /compact). */
   const compactHistory = async () => {
-    const chatHistory: ChatMessage[] = messagesRef.current
-      .filter((m) => m.kind === "chat")
-      .map((m) => ({ role: m.role, content: m.content }));
+    // Conversation content = chat messages PLUS the previous /compact
+    // summary (isSummary). The summary carries the pre-compact
+    // context, so a second /compact must feed it back into the
+    // summarization — filtering `kind === "chat"` only silently lost
+    // it. Ordinary system notices stay out (see
+    // selectConversationMessages).
+    const chatHistory: ChatMessage[] = selectConversationMessages(messagesRef.current);
     if (chatHistory.length === 0) {
       pushSystem("Belum ada percakapan untuk diringkas.");
       return;
@@ -1081,6 +1190,7 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
           role: "assistant",
           content: `Ringkasan percakapan:\n${redact(sanitizeTerminalText(summary))}`,
           kind: "system",
+          isSummary: true,
           ts: Date.now(),
         },
       ]);
@@ -1110,6 +1220,11 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
         pushSystem(
           `Agen koding selalu AKTIF (mode ${modeDisplayName(agentModeRef.current)}). Kirim tugas seperti biasa — agen membaca/mengedit file dan menjalankan perintah di folder ini (${process.cwd()}). /mode untuk ganti mode.`,
         );
+        // Direct response to a command the user just typed: snap to
+        // the bottom so the confirmation is visible even when the
+        // user had scrolled up (same as /export). pushSystem itself
+        // never resets scroll.
+        setScrollOffsetBoth(0);
         break;
       }
       case "mode": {
@@ -1117,6 +1232,9 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
           const parsed = parseMode(arg);
           if (!parsed) {
             pushSystem(`Mode tidak dikenal: ${arg}. Pilih: default, lite, max, plan.`);
+            // Direct response to a command the user just typed (same
+            // rule as /export): snap to the bottom so it is visible.
+            setScrollOffsetBoth(0);
             break;
           }
           agentModeRef.current = parsed;
@@ -1127,6 +1245,9 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
           setAgentMode(next);
         }
         pushSystem(`Mode agen: ${modeDisplayName(agentModeRef.current)}. ${modeDescription(agentModeRef.current)}`);
+        // Direct response to a command the user just typed (same
+        // rule as /export): snap to the bottom so it is visible.
+        setScrollOffsetBoth(0);
         break;
       }
       case "init": {
@@ -1137,6 +1258,9 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
           fs.writeFileSync("AGENTS.md", summary.content, "utf-8");
           pushSystem(`AGENTS.md dibuat di ${process.cwd()}. Isi ringkasannya:\n${summary.content}`);
         }
+        // Direct response to a command the user just typed (same
+        // rule as /export): snap to the bottom so it is visible.
+        setScrollOffsetBoth(0);
         break;
       }
       case "compact":
@@ -1147,11 +1271,16 @@ export default function ChatApp({ apiKey, initialModel, catalog, balanceUsd }: C
           cwd: process.cwd(),
           model: modelRef.current,
           mode: modeDisplayName(agentModeRef.current),
-          messages: messagesRef.current
-            .filter((m) => m.kind === "chat")
-            .map((m) => ({ role: m.role, content: m.content })),
+          messages: selectExportMessages(messagesRef.current),
         });
         pushSystem(`Percakapan diekspor ke:\n${file}`);
+        // The confirmation is the direct result of a command the
+        // user just typed: snap to the bottom so it is visible even
+        // when the user had scrolled up (same as send() / /clear /
+        // /compact). pushSystem itself never resets scroll, so other
+        // system notices keep the sticky-bottom "don't yank while
+        // reading" behaviour.
+        setScrollOffsetBoth(0);
         break;
       }
       case "clear":

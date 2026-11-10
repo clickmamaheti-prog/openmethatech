@@ -3,6 +3,37 @@
 All notable changes to `@methatech-cli/cli`. Versions are published to npm
 as `@methatech-cli/cli`.
 
+## [0.1.10] — 2026-11-10
+
+TUI interaction and conversation rendering fixes on top of the 0.1.9
+Universal Agent Runtime. No runtime, provider, or model changes.
+
+### TUI interaction fix (ContentBlock)
+
+- **Chronological turn order:** one assistant message per turn now holds
+  ordered append-only blocks (text, tool, text, tool) adopted from the
+  Freebuff ContentBlock model, so assistant text, tool calls, tool
+  results, and TODOs render in true arrival order instead of all text
+  above all tool calls.
+- **Tool results attach to their own tool**, including parallel batches;
+  TODOs stay in chronological position as a single list; a tool rejected
+  by the mode is now shown as a system line instead of vanishing.
+- **`/export` after `/compact`:** the compact summary is now included in
+  the export file; ordinary system notices stay out.
+- **Repeated `/compact`:** the previous summary is now fed back into the
+  next summarization, so the context chain survives compact 1 → 2 → 3
+  without duplication and without ordinary system notices leaking in.
+- **Slash-command confirmations while scrolled up:** `/export`, `/mode`,
+  `/agent`, and `/init` confirmations now snap the viewport to the bottom
+  so they are visible after PgUp; other system notices keep the previous
+  "don't yank while reading" behaviour.
+- **Regression tests:** 9 tests in `test/slash.test.mjs` cover export
+  selection and the compact chain; new PTY scenario s35 covers the
+  chronological turn order.
+
+Validation: `npx tsc` clean; `npm test` **428/428**; `test/agent-pty.sh`
+**32/32**; `test/tui-pty.sh` **293/293**.
+
 ## [0.1.9] — 2026-11-10
 
 The Universal Agent Runtime release. The CLI now runs a full local agent

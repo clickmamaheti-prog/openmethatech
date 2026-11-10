@@ -253,10 +253,15 @@ test("flattenMessages: to-do list renders Freebuff-style (header, boxes, striket
       {
         role: "assistant",
         content: "",
-        kind: "todos",
-        todos: [
-          { task: "Baca hello.txt", completed: true },
-          { task: "Jalankan perintah", completed: false },
+        kind: "chat",
+        blocks: [
+          {
+            type: "todos",
+            todos: [
+              { task: "Baca hello.txt", completed: true },
+              { task: "Jalankan perintah", completed: false },
+            ],
+          },
         ],
       },
     ],
@@ -276,11 +281,110 @@ test("flattenMessages: to-do list renders Freebuff-style (header, boxes, striket
 
 test("flattenMessages: empty to-do list renders nothing", () => {
   const lines = flattenMessages(
-    [{ role: "assistant", content: "", kind: "todos", todos: [] }],
+    [{ role: "assistant", content: "", kind: "chat", blocks: [{ type: "todos", todos: [] }] }],
     40,
   );
   // Only the trailing blank line from the message separator.
   assert.ok(lines.every((l) => l.segments.every((s) => s.text.trim() === "")));
+});
+
+// TUI interaction fix (Freebuff ContentBlock model): one assistant
+// message per turn holds its blocks in ARRIVAL order, so text the
+// model wrote AFTER a tool call renders BELOW that tool call —
+// before this change all turn text rendered above all tool calls.
+test("flattenMessages: assistant blocks render in arrival order (text, tool, text)", () => {
+  const lines = flattenMessages(
+    [
+      {
+        role: "assistant",
+        // content keeps the concatenated turn text (for /export);
+        // the layout must render the BLOCKS, not this field.
+        content: "Membaca file dulu.File sudah dibaca.",
+        kind: "chat",
+        blocks: [
+          { type: "text", content: "Membaca file dulu." },
+          { type: "tool", name: "read_files", preview: "Read hello.txt", shell: false, results: [], done: true },
+          { type: "text", content: "File sudah dibaca." },
+        ],
+      },
+    ],
+    40,
+  );
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  const row = (needle) => texts.findIndex((t) => t.includes(needle));
+  assert.ok(row("Membaca file dulu.") >= 0, "first text renders");
+  assert.ok(row("Read hello.txt") > row("Membaca file dulu."), "tool renders below the text that preceded it");
+  assert.ok(row("File sudah dibaca.") > row("Read hello.txt"), "text written after the tool renders BELOW the tool");
+  assert.equal(texts.filter((t) => t.includes("Membaca file dulu.")).length, 1, "no duplicated text");
+  assert.equal(texts.filter((t) => t.includes("Read hello.txt")).length, 1, "no duplicated tool preview");
+});
+
+test("flattenMessages: todos block keeps its position between text blocks", () => {
+  const lines = flattenMessages(
+    [
+      {
+        role: "assistant",
+        content: "",
+        kind: "chat",
+        blocks: [
+          { type: "text", content: "Buat daftar tugas dulu." },
+          {
+            type: "todos",
+            todos: [
+              { task: "Baca hello.txt", completed: false },
+              { task: "Edit hello.txt", completed: false },
+            ],
+          },
+          { type: "text", content: "Tandai yang sudah selesai." },
+        ],
+      },
+    ],
+    40,
+  );
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  const row = (needle) => texts.findIndex((t) => t.includes(needle));
+  assert.ok(row("TODOs") > row("Buat daftar tugas dulu."), "todos render below the preceding text");
+  assert.ok(row("Tandai yang sudah selesai.") > row("TODOs"), "text after the todos renders below the list");
+  assert.ok(row("Baca hello.txt") > row("TODOs"), "todo items render under the header");
+});
+
+test("flattenMessages: each tool block keeps its own result (parallel-wave order)", () => {
+  const lines = flattenMessages(
+    [
+      {
+        role: "assistant",
+        content: "",
+        kind: "chat",
+        blocks: [
+          { type: "tool", name: "read_files", preview: "Read hello.txt", shell: false, results: [], done: true },
+          {
+            type: "tool",
+            name: "run_terminal_command",
+            preview: "$ touch agent-ran.txt",
+            shell: true,
+            results: [{ ok: true, text: "line4 / hello-agent" }],
+            done: true,
+          },
+        ],
+      },
+    ],
+    40,
+  );
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  const row = (needle) => texts.findIndex((t) => t.includes(needle));
+  assert.ok(row("Read hello.txt") >= 0, "first tool renders");
+  assert.ok(row("$ touch agent-ran.txt") > row("Read hello.txt"), "second tool renders below the first");
+  assert.ok(row("hello-agent") > row("$ touch agent-ran.txt"), "shell result renders under its own preview, not under the read");
+  assert.ok(!texts[row("Read hello.txt") + 1]?.includes("hello-agent"), "no result leaks onto the read block");
+});
+
+test("flattenMessages: assistant message without blocks falls back to content", () => {
+  const lines = flattenMessages(
+    [{ role: "assistant", content: "jawaban lama tanpa block", kind: "chat" }],
+    40,
+  );
+  const texts = lines.map((l) => l.segments.map((s) => s.text).join(""));
+  assert.deepEqual(texts, [" jawaban lama tanpa block", "  "]);
 });
 
 test("flattenMessages: assistant block has NO timestamp (Freebuff message-block)", () => {
@@ -976,14 +1080,18 @@ test("flattenMessages: long shell preview word-wraps, never splits mid-word", ()
     [
       {
         role: "assistant",
-        content: "$ touch agent-ran.txt",
-        kind: "tool",
-        tool: {
-          name: "run_terminal_command",
-          preview: "$ touch agent-ran.txt && echo line1 && echo line2 && echo line3 && echo line4 && echo hello-agent",
-          shell: true,
-          results: [],
-        },
+        content: "",
+        kind: "chat",
+        blocks: [
+          {
+            type: "tool",
+            name: "run_terminal_command",
+            preview: "$ touch agent-ran.txt && echo line1 && echo line2 && echo line3 && echo line4 && echo hello-agent",
+            shell: true,
+            results: [],
+            done: true,
+          },
+        ],
       },
     ],
     40,
@@ -1006,17 +1114,21 @@ test("flattenMessages: structured tool message — shell preview $ green + bold,
     [
       {
         role: "assistant",
-        content: "$ ls",
-        kind: "tool",
-        tool: {
-          name: "run_terminal_command",
-          preview: "$ ls -la",
-          shell: true,
-          results: [
-            { ok: true, text: "README.md" },
-            { ok: false, text: "permission denied" },
-          ],
-        },
+        content: "",
+        kind: "chat",
+        blocks: [
+          {
+            type: "tool",
+            name: "run_terminal_command",
+            preview: "$ ls -la",
+            shell: true,
+            results: [
+              { ok: true, text: "README.md" },
+              { ok: false, text: "permission denied" },
+            ],
+            done: true,
+          },
+        ],
       },
     ],
     40,
@@ -1044,9 +1156,18 @@ test("flattenMessages: structured non-shell tool preview is bold foreground", ()
     [
       {
         role: "assistant",
-        content: "Read README.md",
-        kind: "tool",
-        tool: { name: "read_files", preview: "Read README.md", shell: false, results: [{ ok: true, text: "120 lines" }] },
+        content: "",
+        kind: "chat",
+        blocks: [
+          {
+            type: "tool",
+            name: "read_files",
+            preview: "Read README.md",
+            shell: false,
+            results: [{ ok: true, text: "120 lines" }],
+            done: true,
+          },
+        ],
       },
     ],
     40,
@@ -1091,14 +1212,18 @@ test("flattenMessages: ANSI escapes in tool output never reach the terminal", ()
     [
       {
         role: "assistant",
-        content: "$ cat file",
-        kind: "tool",
-        tool: {
-          name: "run_terminal_command",
-          preview: "$ cat file",
-          shell: true,
-          results: [{ ok: true, text: "clean\x1b[31mred\x1b[0m text" }],
-        },
+        content: "",
+        kind: "chat",
+        blocks: [
+          {
+            type: "tool",
+            name: "run_terminal_command",
+            preview: "$ cat file",
+            shell: true,
+            results: [{ ok: true, text: "clean\x1b[31mred\x1b[0m text" }],
+            done: true,
+          },
+        ],
       },
     ],
     40,

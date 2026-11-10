@@ -78,9 +78,12 @@ stop_tui() { tmux send-keys -t "$SESSION" C-c; sleep 1; tmux kill-session -t "$S
 # --- Scenario A1: agent runs BY DEFAULT (no /agent toggle — Freebuff has
 # none: router.ts:480 "send to agent"), mode in footer, tool call renders,
 # shell runs directly (no gate) ---
-# 40 rows: the 6-step script (todos + read + edit + shell + final text
+# 50 rows: the 6-step script (todos + read + edit + shell + final text
 # with heading/inline code/link) fits without scrolling out of view.
-start_tui 80 40
+# (TUI interaction fix: one blank line between blocks inside a turn,
+# Freebuff message-block.tsx gap 1 — the turn is ~4 rows taller than
+# the old flat layout, which packed all turn text with no gaps.)
+start_tui 80 50
 capture a1-welcome
 check "$OUTDIR/a1-welcome.plain.txt" "Agent: Default" "a1: footer shows Agent: Default on the welcome screen (agent is default)"
 send "baca hello.txt dan jalankan echo"
@@ -118,8 +121,10 @@ check_absent "$OUTDIR/a1-done.plain.txt" "codebuff_tool_call" "a1: tool-call XML
 stop_tui
 
 # --- Scenario A2: /mode plan — shell tool is removed at the toolset level ---
+# 50 rows: the rejected-call notices (system lines after the turn) and
+# the read preview must both stay visible in one window (see A1 note).
 restart_mock
-start_tui 80 24
+start_tui 80 50
 send "/mode plan"
 send Enter
 sleep 1

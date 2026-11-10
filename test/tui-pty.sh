@@ -1008,14 +1008,18 @@ check_absent "$OUTDIR/s31-toolwall-80.plain.txt" "BARIS BESAR 01" "s31/80: no co
 check_absent "$OUTDIR/s31-toolwall-80.plain.txt" "MARKER_LINE_42_RAHASIA_DAPUR" "s31/80: marker line 42 never reaches the screen"
 check "$OUTDIR/s31-toolwall-80.plain.txt" "Selesai" "s31/80: agent run completes"
 stop_tui
-# Narrow terminal: same, no overflow.
+# Narrow terminal: same, no overflow. 40x20 (not 40x15): the test is
+# about narrow WIDTH (wrapping), and the turn is taller since the
+# TUI interaction fix (one blank line between blocks, Freebuff
+# message-block.tsx gap 1) — at 15 rows the "Read big.txt" preview
+# scrolls off the top of the 7-row message area.
 # 0.1.9 §4o harness fix: the mock's agentReq is stateful per process —
 # the 80-col run above already consumed texts[0] (read) and texts[1]
 # (complete), so without a restart the 40-col run would get texts[1]
 # for its FIRST request (no read_files call, no "Read big.txt" preview
 # at all) and the check could never pass. Restart resets agentReq.
 restart_mock 5000
-start_tui 40 15
+start_tui 40 20
 send "baca big.txt"
 send Enter
 sleep 13
@@ -1234,6 +1238,104 @@ check "$OUTDIR/s34-noscroll-40-up.plain.txt" "baris di atas" "s34/40: scroll ind
 check_absent "$OUTDIR/s34-noscroll-40-up.plain.txt" "█" "s34/40: no scrollbar thumb on a narrow terminal"
 check_no_track "$OUTDIR/s34-noscroll-40-up.plain.txt" "s34/40: no scrollbar track at the right edge on a narrow terminal"
 stop_tui
+
+# --- Scenario 35: turn block order (TUI interaction fix, Freebuff
+# ContentBlock model) — one assistant message per turn, blocks in
+# arrival order (text, tool, text, tool...). Before the fix ALL turn
+# text rendered ABOVE all tool calls; after the fix the order is the
+# true arrival order, each tool result sits under its own tool block,
+# the TODOs list sits at its chronological position (upsert replaces
+# in place, one list only), nothing duplicates, the input stays in
+# the input area while streaming, and a redraw after completion is
+# byte-identical. Uses the default MOCK_AGENT 6-step script.
+# NOTE on the last step: the loop emits the step's text event BEFORE
+# it parses the tool call at step end, so the final "# Selesai" text
+# correctly renders ABOVE the "Task completed" tool block — the TUI
+# renders the loop's arrival order, it does not reorder it.
+export MOCK_AGENT=1
+restart_mock
+reset_credentials
+# Agent cwd is the repo root (like s31's big.txt): the script reads
+# and edits hello.txt, then runs the shell command there. Created
+# here, removed at the end of this scenario — never committed.
+printf 'isi hello untuk agen\n' > hello.txt
+# 56 rows: the completed 6-step turn is 52 rows tall (header + user
+# + 11 blocks with Freebuff gap-1 + status/input/footer), so 50 rows
+# would scroll the user message off the top once the final
+# task_completed block lands — the turn must fit whole for the
+# no-position-shift checks below to mean anything.
+start_tui 80 56
+send "baca hello.txt dan jalankan echo"
+send Enter
+sleep 3
+capture s35-mid-80
+check_row "$OUTDIR/s35-mid-80.plain.txt" "You: baca hello.txt" 3 "s35/80: user message stays on row 3 mid-stream (streaming does not move messages)"
+check "$OUTDIR/s35-mid-80.plain.txt" "■ Esc" "s35/80: status row with Esc visible while streaming"
+check_last_row "$OUTDIR/s35-mid-80.plain.txt" "╰" 54 "s35/80: input bottom border stays on row 54 mid-stream (input stays in the input area)"
+sleep 10
+capture s35-done-80
+check_row "$OUTDIR/s35-done-80.plain.txt" "You: baca hello.txt" 3 "s35/80: user message still on row 3 after the turn (no position shift)"
+check_last_row "$OUTDIR/s35-done-80.plain.txt" "╰" 54 "s35/80: input bottom border stays on row 54 after the turn"
+check_absent "$OUTDIR/s35-done-80.plain.txt" "working..." "s35/80: status row gone after the turn (status never enters the transcript)"
+check_order() { # check_order <file> <earlier> <later> <label>
+  local a b
+  a=$(row_of "$1" "$2"); b=$(row_of "$1" "$3")
+  if [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]; then
+    echo "PASS: $4"; PASS=$((PASS+1))
+  else
+    echo "FAIL: $4 (rows '${a:-none}' vs '${b:-none}', expected '$2' above '$3')"; FAIL=$((FAIL+1))
+  fi
+}
+check_count() { # check_count <file> <needle> <expected> <label>
+  local n
+  n=$(grep -c -F -- "$2" "$1")
+  if [ "$n" = "$3" ]; then echo "PASS: $4"; PASS=$((PASS+1)); else echo "FAIL: $4 (count $n, expected $3)"; FAIL=$((FAIL+1)); fi
+}
+check_order "$OUTDIR/s35-done-80.plain.txt" "Buat daftar tugas dulu." "TODOs" "s35/80: first text above the TODOs list (arrival order)"
+check_order "$OUTDIR/s35-done-80.plain.txt" "TODOs" "Membaca file dulu." "s35/80: TODOs list above the next text (not floating above newer content)"
+check_order "$OUTDIR/s35-done-80.plain.txt" "Membaca file dulu." "Read hello.txt" "s35/80: text above its tool call"
+check_order "$OUTDIR/s35-done-80.plain.txt" "Read hello.txt" "Edit file." "s35/80: tool call above the text written after it (was: all text on top)"
+check_order "$OUTDIR/s35-done-80.plain.txt" "Edit file." "edited hello.txt (1 replacement)" "s35/80: str_replace result under its own preview"
+check_order "$OUTDIR/s35-done-80.plain.txt" "edited hello.txt (1 replacement)" "Tandai yang sudah selesai." "s35/80: next text below the edit result"
+check_order "$OUTDIR/s35-done-80.plain.txt" "Sekarang jalankan perintah." "touch agent-ran.txt" "s35/80: text above the shell call"
+check_order "$OUTDIR/s35-done-80.plain.txt" "touch agent-ran.txt" "hello-agent" "s35/80: shell result under its own preview"
+check_order "$OUTDIR/s35-done-80.plain.txt" "hello-agent" "Selesai" "s35/80: final text below the shell result"
+check_order "$OUTDIR/s35-done-80.plain.txt" "Selesai" "Task completed" "s35/80: task_completed block after the final text (loop emits text before parsing the call)"
+check_count "$OUTDIR/s35-done-80.plain.txt" "Buat daftar tugas dulu." 1 "s35/80: first text appears exactly once (no redraw duplication)"
+check_count "$OUTDIR/s35-done-80.plain.txt" "Read hello.txt" 1 "s35/80: tool preview appears exactly once"
+check_count "$OUTDIR/s35-done-80.plain.txt" "TODOs" 1 "s35/80: one TODOs list only (upsert replaces in place)"
+check_count "$OUTDIR/s35-done-80.plain.txt" "Update to-dos" 2 "s35/80: two write_todos tool blocks (one per call)"
+# Redraw stability: two captures 1s apart after completion must be
+# byte-identical (no timer, no spinner left running).
+sleep 1
+capture s35-done-80b
+if diff -q "$OUTDIR/s35-done-80.plain.txt" "$OUTDIR/s35-done-80b.plain.txt" > /dev/null; then
+  echo "PASS: s35/80: redraw after completion is byte-identical (no shifting or duplication)"; PASS=$((PASS+1))
+else
+  echo "FAIL: s35/80: redraw after completion differs"; FAIL=$((FAIL+1))
+fi
+# Long-conversation scroll: the 56-row leg fits the whole turn, so
+# PgUp there is a no-op (nothing above to scroll to, no indicator —
+# correct behavior). Scroll is verified on a second leg at 80x24,
+# where the 44-line turn overflows the 16-row message area: PgUp
+# must show the indicator, and the visible slice must still be in
+# arrival order.
+stop_tui
+restart_mock
+reset_credentials
+printf 'isi hello untuk agen\n' > hello.txt
+start_tui 80 24
+send "baca hello.txt dan jalankan echo"
+send Enter
+sleep 13
+send PageUp
+sleep 0.3
+capture s35-up-80
+check "$OUTDIR/s35-up-80.plain.txt" "baris di atas" "s35/80: scroll indicator shown while scrolled up"
+check_order "$OUTDIR/s35-up-80.plain.txt" "Tandai yang sudah selesai." "Sekarang jalankan perintah." "s35/80: order kept while scrolled up"
+stop_tui
+rm -f hello.txt agent-ran.txt
+unset MOCK_AGENT
 
 echo ""
 echo "PTY results: PASS=$PASS FAIL=$FAIL (captures in $OUTDIR)"

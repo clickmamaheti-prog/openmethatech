@@ -114,6 +114,46 @@ export interface ExportOptions {
   messages: { role: string; content: string }[];
 }
 
+/**
+ * A display message as /export sees it: role + content + kind, plus
+ * the /compact summary flag. The summary is a `kind: "system"`
+ * message, but it CARRIES the pre-compact conversation — unlike an
+ * ordinary system notice (mode change, export confirmation, agent
+ * stop reason), which is not part of the conversation.
+ */
+export interface ExportableMessage {
+  role: string;
+  content: string;
+  kind: "chat" | "system";
+  /** True only for the /compact summary message. */
+  isSummary?: boolean;
+}
+
+/**
+ * Pick the messages that carry the conversation, in original order:
+ * every chat message, plus the /compact summary. Ordinary system
+ * notices (mode change, export confirmation, agent stop reason) stay
+ * out. This is the ONE definition of "conversation content" — /export
+ * and /compact both use it, so a summary can never be dropped from
+ * one path but kept in the other. (Bug 1 follow-up: /compact filtered
+ * `kind === "chat"` only, so a second /compact silently lost the
+ * first summary from the summarization input.)
+ */
+export function selectConversationMessages(messages: ExportableMessage[]): ChatMessage[] {
+  return messages
+    .filter((m) => m.kind === "chat" || m.isSummary === true)
+    .map((m) => ({ role: m.role as ChatMessage["role"], content: m.content }));
+}
+
+/**
+ * Pick the messages that belong in an /export file: same set as
+ * selectConversationMessages (every chat message, plus the /compact
+ * summary; ordinary system notices stay out).
+ */
+export function selectExportMessages(messages: ExportableMessage[]): { role: string; content: string }[] {
+  return selectConversationMessages(messages);
+}
+
 /** Write a Markdown export of the conversation; returns the file path. */
 export function exportConversation(opts: ExportOptions): string {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);

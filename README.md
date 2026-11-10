@@ -235,4 +235,4 @@ Default model: `glm-5.3-flash`. Fallback model: `deepseek-v4-flash`.
   `kimi-k2.7-code` is retired upstream but still listed among the
   free models.
 
-See `CHANGELOG.md` for the full 0.1.9 change list.
+See `CHANGELOG.md` for the full 0.1.10 change list.

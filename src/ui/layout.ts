@@ -240,35 +240,56 @@ export function splitSegments(segments: VisualSegment[], width: number): VisualL
   return lines;
 }
 
+/**
+ * One ordered block inside a single assistant turn message (Freebuff
+ * ChatMessage.blocks / ContentBlock, cli/src/types/chat.ts +
+ * components/blocks/blocks-renderer.tsx). A turn is ONE assistant
+ * message whose blocks grow append-only in arrival order — text,
+ * tool, text, tool — so the turn reads in true chronological order.
+ * Before this change, tool calls and to-dos were separate top-level
+ * messages appended AFTER the assistant message, so ALL assistant
+ * text (including text produced AFTER the tools ran) rendered ABOVE
+ * all tool calls. Blocks fix that at the data-model level.
+ */
+export type AssistantBlock =
+  | { type: "text"; content: string }
+  | {
+      type: "tool";
+      name: string;
+      preview: string;
+      /** True for run_terminal_command (Freebuff `$ ` + bold command). */
+      shell: boolean;
+      results: { ok: boolean; text: string }[];
+      /**
+       * True once this call's result arrived (even when the summary
+       * is null, e.g. a successful read_files shows no result line
+       * — §4m). The TUI matches a tool_result to the earliest
+       * UNRESOLVED block of that tool, so a null-summary result
+       * must still mark its block resolved or a later result for
+       * the same tool would attach to the wrong block.
+       */
+      done: boolean;
+    }
+  | { type: "todos"; todos: { task: string; completed: boolean }[] };
+
 /** Minimal message shape the layout needs (mirrors ChatApp's messages). */
 export interface LayoutMessage {
   role: "user" | "assistant" | "system" | "tool";
   content: string;
-  kind: "chat" | "system" | "tool" | "todos";
+  kind: "chat" | "system";
   /** Epoch ms the message was created (renders as [HH:MM] above it). */
   ts?: number;
   /** Reasoning text received before the answer (delta.reasoning_content). */
   thinking?: string;
   /** True once the stream that produced the reasoning finished. */
   thinkingComplete?: boolean;
-  /** To-do list for kind "todos" (Freebuff shape: {task, completed}). */
-  todos?: { task: string; completed: boolean }[];
   /**
-   * Structured tool call for kind "tool" (Freebuff ToolCallItem +
-   * TerminalCommandDisplay semantics). The preview line renders BOLD
-   * in foreground; a shell preview renders `$ ` in success green +
-   * the command BOLD; each result line renders ✓ in success green
-   * or ✗ in error red, so a failed call is never painted as a
-   * success. `preview`/`results` are plain text (no ANSI — external
-   * text is sanitized before it reaches the layout).
+   * Ordered blocks of one assistant turn (see AssistantBlock).
+   * User and system messages do not carry blocks — they render
+   * `content`. An assistant message WITHOUT blocks falls back to
+   * rendering `content` as a single text block (legacy fixtures).
    */
-  tool?: {
-    name: string;
-    preview: string;
-    /** True for run_terminal_command (Freebuff `$ ` + bold command). */
-    shell: boolean;
-    results: { ok: boolean; text: string }[];
-  };
+  blocks?: AssistantBlock[];
   /**
    * Attachments sent with this user message (compact metadata only
    * — the full content lives in the agent history). Rendered as one
@@ -345,125 +366,21 @@ export function flattenMessages(
       ...raw,
       content: sanitizeTerminalText(raw.content),
       thinking: raw.thinking === undefined ? undefined : sanitizeTerminalText(raw.thinking),
-      todos: raw.todos?.map((t) => ({ ...t, task: sanitizeTerminalText(t.task) })),
-      tool:
-        raw.tool === undefined
-          ? undefined
-          : {
-              ...raw.tool,
-              preview: sanitizeTerminalText(raw.tool.preview),
-              results: raw.tool.results.map((r) => ({ ...r, text: sanitizeTerminalOutput(r.text) })),
-            },
+      blocks: raw.blocks?.map((b) =>
+        b.type === "text"
+          ? { ...b, content: sanitizeTerminalText(b.content) }
+          : b.type === "tool"
+            ? {
+                ...b,
+                preview: sanitizeTerminalText(b.preview),
+                results: b.results.map((r) => ({ ...r, text: sanitizeTerminalOutput(r.text) })),
+              }
+            : { ...b, todos: b.todos.map((t) => ({ ...t, task: sanitizeTerminalText(t.task) })) },
+      ),
       attachments: raw.attachments?.map((a) => ({ ...a, title: sanitizeTerminalText(a.title) })),
     };
     const tsLine = m.ts !== undefined ? plainLine(formatTimestamp(m.ts), theme.muted) : null;
-    if (m.kind === "tool") {
-      // Agent tool call — Freebuff ToolCallItem + TerminalCommandDisplay:
-      // the header is the tool preview BOLD in foreground; a shell
-      // preview renders `$ ` in success green + the command BOLD
-      // (TerminalCommandDisplay); each result line renders ✓ in
-      // success green or ✗ in error red, so a failed call is never
-      // painted as a success. Unstructured legacy tool messages
-      // (plain content string) keep the old neon-first-line look.
-      const tool = m.tool;
-      if (tool) {
-        // Word-wrap the preview (never split a word mid-token the
-        // way a hard split would: "$ ... echo lin/e4"). First line
-        // carries the `$ ` prefix (shell) or the plain preview;
-        // continuation lines indent 2 spaces under the command.
-        const wrappedPreview = wrapText(tool.preview, width);
-        wrappedPreview.forEach((w, i) => {
-          if (tool.shell && tool.preview.startsWith("$ ")) {
-            if (i === 0) {
-              lines.push({
-                segments: [
-                  { text: "$ ", color: theme.success, bold: true },
-                  { text: w.slice(2), color: theme.text, bold: true },
-                ],
-              });
-            } else {
-              lines.push({
-                segments: [
-                  { text: "  " },
-                  { text: w, color: theme.text, bold: true },
-                ],
-              });
-            }
-          } else {
-            lines.push({ segments: [{ text: w, color: theme.text, bold: true }] });
-          }
-        });
-        for (const r of tool.results) {
-          const wrapped = wrapText(r.text, Math.max(1, width - 4));
-          wrapped.forEach((w, i) => {
-            lines.push({
-              segments:
-                i === 0
-                  ? [
-                      { text: "  " },
-                      { text: r.ok ? "✓ " : "✗ ", color: r.ok ? theme.success : theme.error, bold: true },
-                      { text: w, color: r.ok ? theme.muted : theme.error },
-                    ]
-                  : [
-                      { text: "    " },
-                      { text: w, color: r.ok ? theme.muted : theme.error },
-                    ],
-            });
-          });
-        }
-      } else {
-        const wrapped = wrapText(m.content, width);
-        wrapped.forEach((w, i) => {
-          lines.push(plainLine(w, i === 0 ? theme.accentSecondary : theme.muted));
-        });
-      }
-    } else if (m.kind === "todos") {
-      // Freebuff cli/src/components/tools/write-todos.tsx: header
-      // "• TODOs" (bullet + BOLD "TODOs", foreground); items indented
-      // 2 spaces; completed = "✓ " in success + task in muted +
-      // strikethrough; pending = "☐ " in foreground + task in
-      // foreground. An empty list renders nothing.
-      const todos = m.todos ?? [];
-      if (todos.length > 0) {
-        lines.push({
-          segments: [
-            { text: "• ", color: theme.text },
-            { text: "TODOs", color: theme.text, bold: true },
-          ],
-        });
-        for (const t of todos) {
-          const wrapped = wrapText(t.task, Math.max(1, width - 4));
-          wrapped.forEach((w, i) => {
-            if (i === 0) {
-              lines.push({
-                segments: [
-                  { text: "  " },
-                  t.completed
-                    ? { text: "✓ ", color: theme.success }
-                    : { text: "☐ ", color: theme.text },
-                  {
-                    text: w,
-                    color: t.completed ? theme.muted : theme.text,
-                    strikethrough: t.completed === true,
-                  },
-                ],
-              });
-            } else {
-              lines.push({
-                segments: [
-                  { text: "    " },
-                  {
-                    text: w,
-                    color: t.completed ? theme.muted : theme.text,
-                    strikethrough: t.completed === true,
-                  },
-                ],
-              });
-            }
-          });
-        }
-      }
-    } else if (m.kind === "system") {
+    if (m.kind === "system") {
       for (const w of wrapText(m.content, width)) lines.push(plainLine(w, theme.muted));
     } else if (m.role === "user") {
       // Freebuff single-block.tsx:102 — the whole user text block is
@@ -560,92 +477,204 @@ export function flattenMessages(
           }
         }
       }
-      // Freebuff message-block.tsx:275 — the blocks container inside
-      // one message has gap: 1 (one blank line between the Thinking
-      // block and the answer text that follows). Without it the
-      // Thinking preview runs straight into the answer and the whole
-      // assistant block reads as one cramped blob of chat text
-      // ("dempet" on a narrow Termux screen). The gap appears only
-      // when there IS answer content after the thinking; a
-      // still-streaming message with reasoning but no text yet keeps
-      // just the message's own trailing blank line (Freebuff renders
-      // empty text blocks as null).
-      if (thinkingRendered && m.content.trim().length > 0) {
-        lines.push(blankLine());
-      }
-      // Freebuff single-block.tsx: an empty text block renders null
-      // (no lines at all). Without this guard an empty assistant
-      // message (the streaming placeholder, or a turn whose model
-      // only thought) emits one blank line from its empty content
-      // PLUS the message's trailing blank line — two blank rows.
-      // pendingBlank lives at the parts level: a text part that ends
-      // with blank lines hands the break to the NEXT part — a code
-      // block keeps the paragraph break (it is not a tight
-      // followup), while a trailing blank at the end of the message
-      // is dropped (the message's own trailing blank line follows).
-      const parts = m.content.trim().length === 0 ? [] : splitMessageParts(m.content);
-      let pendingBlank = false;
-      let emitted = false;
-      parts.forEach((part, pi) => {
-        if (part.type === "code") {
-          if (pendingBlank) {
-            lines.push(blankLine());
-            pendingBlank = false;
-          }
-          emitted = true;
-          // Freebuff markdown-renderer.tsx: code blocks are MONOCHROME
-          // (no per-token colors) — header "// lang" in codeHeaderFg,
-          // body lines in codeTextFg on codeBackground.
-          if (part.lang) lines.push(plainLine(`// ${part.lang}`, markdown.codeHeaderFg));
-          const rawLines = part.content.split("\n");
-          if (rawLines.length > 0 && rawLines[rawLines.length - 1] === "") rawLines.pop();
-          for (const raw of rawLines) {
-            const segs: VisualSegment[] = [
-              {
-                text: raw === "" ? " " : raw,
-                color: markdown.codeTextFg,
-                backgroundColor: markdown.codeBackground,
-              },
-            ];
-            for (const l of splitSegments(segs, width)) lines.push(l);
+      // Blocks (Freebuff ContentBlock, append-only, arrival order):
+      // one assistant message per turn; text and tool/todos blocks
+      // render in the order they arrived, so text the model wrote
+      // AFTER a tool call renders BELOW that tool call. An assistant
+      // message without blocks falls back to `content` as a single
+      // text block (legacy fixtures / plain chat).
+      const blocks: AssistantBlock[] =
+        m.blocks ??
+        (m.content.trim().length > 0 ? [{ type: "text" as const, content: m.content }] : []);
+      // One blank line between blocks inside one message (Freebuff
+      // message-block.tsx:275 gap: 1) — the same rhythm the old
+      // separate top-level messages had via their trailing blank
+      // line. The Thinking block counts as an emitted block, so the
+      // gap after it is the same rule, not a special case.
+      let emittedAny = thinkingRendered;
+      const blockWillEmit = (b: AssistantBlock): boolean =>
+        b.type === "tool" ||
+        (b.type === "todos" && b.todos.length > 0) ||
+        (b.type === "text" && b.content.trim().length > 0);
+      for (const block of blocks) {
+        if (!blockWillEmit(block)) continue;
+        if (emittedAny) lines.push(blankLine());
+        if (block.type === "text") {
+          // Freebuff single-block.tsx: an empty text block renders null
+          // (no lines at all). Without this guard an empty assistant
+          // message (the streaming placeholder, or a turn whose model
+          // only thought) emits one blank line from its empty content
+          // PLUS the message's trailing blank line — two blank rows.
+          // pendingBlank lives at the parts level: a text part that ends
+          // with blank lines hands the break to the NEXT part — a code
+          // block keeps the paragraph break (it is not a tight
+          // followup), while a trailing blank at the end of the message
+          // is dropped (the message's own trailing blank line follows).
+          const parts = block.content.trim().length === 0 ? [] : splitMessageParts(block.content);
+          let pendingBlank = false;
+          let emitted = false;
+          parts.forEach((part, pi) => {
+            if (part.type === "code") {
+              if (pendingBlank) {
+                lines.push(blankLine());
+                pendingBlank = false;
+              }
+              emitted = true;
+              // Freebuff markdown-renderer.tsx: code blocks are MONOCHROME
+              // (no per-token colors) — header "// lang" in codeHeaderFg,
+              // body lines in codeTextFg on codeBackground.
+              if (part.lang) lines.push(plainLine(`// ${part.lang}`, markdown.codeHeaderFg));
+              const rawLines = part.content.split("\n");
+              if (rawLines.length > 0 && rawLines[rawLines.length - 1] === "") rawLines.pop();
+              for (const raw of rawLines) {
+                const segs: VisualSegment[] = [
+                  {
+                    text: raw === "" ? " " : raw,
+                    color: markdown.codeTextFg,
+                    backgroundColor: markdown.codeBackground,
+                  },
+                ];
+                for (const l of splitSegments(segs, width)) lines.push(l);
+              }
+            } else {
+              // Parse-first Markdown (markdown.ts renderMarkdownText):
+              // the whole text part goes through remark into an mdast
+              // AST, blocks render from the AST, inline spans wrap as
+              // styled segments. A pending blank is the part-boundary
+              // rule only — paragraph spacing INSIDE the part is the
+              // AST renderer's own job (blank after a paragraph unless
+              // the next block is a tight followup: list / blockquote /
+              // heading / divider / table). A text part that starts or
+              // ends with a blank line hands the break to the neighbour
+              // part (a code block keeps the paragraph break; a trailing
+              // blank at the end of the message is dropped — the
+              // message's own trailing blank line follows). The gap is
+              // emitted once content has been emitted in this message,
+              // so a leading newline never grows a leading blank line.
+              // The assistant body renders in theme.text (Freebuff
+              // message-block.tsx:188: textColor ?? theme.foreground):
+              // without it plain paragraphs carry NO color and fall back
+              // to the terminal default foreground, which reads gray on
+              // Reza's Termux. Semantic elements keep their own colors
+              // (heading / inline code / link / blockquote / code block).
+              const rendered = renderMarkdownText(part.content, width, theme.text);
+              if (rendered.lines.length === 0) {
+                if ((rendered.endsBlank || rendered.startsBlank) && (emitted || pi > 0)) {
+                  pendingBlank = true;
+                }
+              } else {
+                if ((pendingBlank || rendered.startsBlank) && (emitted || pi > 0) && !rendered.startsTight) {
+                  lines.push(blankLine());
+                }
+                pendingBlank = false;
+                emitted = true;
+                for (const l of rendered.lines) lines.push(l);
+                pendingBlank = rendered.endsBlank;
+              }
+            }
+          });
+        } else if (block.type === "tool") {
+          // Agent tool call — Freebuff ToolCallItem +
+          // TerminalCommandDisplay: the preview renders BOLD in
+          // foreground; a shell preview renders `$ ` in success
+          // green + the command BOLD; each result line renders ✓
+          // in success green or ✗ in error red, so a failed call
+          // is never painted as a success.
+          const tool = block;
+          // Word-wrap the preview (never split a word mid-token the
+          // way a hard split would: "$ ... echo lin/e4"). First line
+          // carries the `$ ` prefix (shell) or the plain preview;
+          // continuation lines indent 2 spaces under the command.
+          const wrappedPreview = wrapText(tool.preview, width);
+          wrappedPreview.forEach((w, i) => {
+            if (tool.shell && tool.preview.startsWith("$ ")) {
+              if (i === 0) {
+                lines.push({
+                  segments: [
+                    { text: "$ ", color: theme.success, bold: true },
+                    { text: w.slice(2), color: theme.text, bold: true },
+                  ],
+                });
+              } else {
+                lines.push({
+                  segments: [
+                    { text: "  " },
+                    { text: w, color: theme.text, bold: true },
+                  ],
+                });
+              }
+            } else {
+              lines.push({ segments: [{ text: w, color: theme.text, bold: true }] });
+            }
+          });
+          for (const r of tool.results) {
+            const wrapped = wrapText(r.text, Math.max(1, width - 4));
+            wrapped.forEach((w, i) => {
+              lines.push({
+                segments:
+                  i === 0
+                    ? [
+                        { text: "  " },
+                        { text: r.ok ? "✓ " : "✗ ", color: r.ok ? theme.success : theme.error, bold: true },
+                        { text: w, color: r.ok ? theme.muted : theme.error },
+                      ]
+                    : [
+                        { text: "    " },
+                        { text: w, color: r.ok ? theme.muted : theme.error },
+                      ],
+              });
+            });
           }
         } else {
-          // Parse-first Markdown (markdown.ts renderMarkdownText):
-          // the whole text part goes through remark into an mdast
-          // AST, blocks render from the AST, inline spans wrap as
-          // styled segments. A pending blank is the part-boundary
-          // rule only — paragraph spacing INSIDE the part is the
-          // AST renderer's own job (blank after a paragraph unless
-          // the next block is a tight followup: list / blockquote /
-          // heading / divider / table). A text part that starts or
-          // ends with a blank line hands the break to the neighbour
-          // part (a code block keeps the paragraph break; a trailing
-          // blank at the end of the message is dropped — the
-          // message's own trailing blank line follows). The gap is
-          // emitted once content has been emitted in this message,
-          // so a leading newline never grows a leading blank line.
-          // The assistant body renders in theme.text (Freebuff
-          // message-block.tsx:188: textColor ?? theme.foreground):
-          // without it plain paragraphs carry NO color and fall back
-          // to the terminal default foreground, which reads gray on
-          // Reza's Termux. Semantic elements keep their own colors
-          // (heading / inline code / link / blockquote / code block).
-          const rendered = renderMarkdownText(part.content, width, theme.text);
-          if (rendered.lines.length === 0) {
-            if ((rendered.endsBlank || rendered.startsBlank) && (emitted || pi > 0)) {
-              pendingBlank = true;
+          // Freebuff cli/src/components/tools/write-todos.tsx:
+          // header "• TODOs" (bullet + BOLD "TODOs", foreground);
+          // items indented 2 spaces; completed = "✓ " in success
+          // + task in muted + strikethrough; pending = "☐ " in
+          // foreground + task in foreground. An empty list renders
+          // nothing.
+          const todos = block.todos;
+          if (todos.length > 0) {
+            lines.push({
+              segments: [
+                { text: "• ", color: theme.text },
+                { text: "TODOs", color: theme.text, bold: true },
+              ],
+            });
+            for (const t of todos) {
+              const wrapped = wrapText(t.task, Math.max(1, width - 4));
+              wrapped.forEach((w, i) => {
+                if (i === 0) {
+                  lines.push({
+                    segments: [
+                      { text: "  " },
+                      t.completed
+                        ? { text: "✓ ", color: theme.success }
+                        : { text: "☐ ", color: theme.text },
+                      {
+                        text: w,
+                        color: t.completed ? theme.muted : theme.text,
+                        strikethrough: t.completed === true,
+                      },
+                    ],
+                  });
+                } else {
+                  lines.push({
+                    segments: [
+                      { text: "    " },
+                      {
+                        text: w,
+                        color: t.completed ? theme.muted : theme.text,
+                        strikethrough: t.completed === true,
+                      },
+                    ],
+                  });
+                }
+              });
             }
-          } else {
-            if ((pendingBlank || rendered.startsBlank) && (emitted || pi > 0) && !rendered.startsTight) {
-              lines.push(blankLine());
-            }
-            pendingBlank = false;
-            emitted = true;
-            for (const l of rendered.lines) lines.push(l);
-            pendingBlank = rendered.endsBlank;
           }
         }
-      });
+        emittedAny = true;
+      }
     }
     lines.push(blankLine());
   }
